@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "muster"
+version = "0.1.0"
+description = "Local-first personal knowledge index"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.12",
+    "sqlite-vec>=0.1.6",
+]
+
+[project.optional-dependencies]
+gmail = [
+    "google-api-python-client>=2.0",
+    "google-auth-oauthlib>=1.2",
+]
+parse = [
+    "talon>=1.6",
+    "pymupdf>=1.24",
+    "ocrmac>=1.0",
+]
+embed = [
+    "sentence-transformers>=3.0",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+muster = "muster.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["muster"]
+
+# Migrations live at the repo root per the project layout, but must ship inside
+# the wheel so an installed CLI can find them without the source tree.
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "muster/migrations"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

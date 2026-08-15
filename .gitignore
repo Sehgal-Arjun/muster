@@ -1,0 +1,32 @@
+# Data — never committed. Blobs are content-addressed originals; the DB is derived.
+blobs/
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets
+.env
+credentials.json
+client_secret*.json
+token.json
+*token*.json
+
+# Eval output
+eval/results/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# Claude Code
+.claude/
