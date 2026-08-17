@@ -54,6 +54,8 @@ class BlobStore:
 
     # --- locating ---------------------------------------------------------
 
+    digest_of = staticmethod(sha256_bytes)
+
     def abspath(self, digest_or_relpath: str) -> Path:
         """Absolute path for a digest, or for a store-relative path from the DB."""
         if "/" in digest_or_relpath:

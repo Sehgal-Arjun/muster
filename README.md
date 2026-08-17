@@ -28,6 +28,23 @@ python3.12 -m venv .venv
 .venv/bin/muster status
 ```
 
+## Gmail
+
+One-time setup:
+
+1. In Google Cloud Console, create a project and enable the **Gmail API**.
+2. Create an **OAuth client ID** of type *Desktop app*; download the JSON.
+3. Save it as `~/.muster/credentials.json`.
+4. Add your own address as a test user on the OAuth consent screen.
+
+```sh
+muster sync gmail --query "newer_than:7d" --limit 50
+```
+
+The first run opens a browser for consent and caches a token at
+`~/.muster/gmail_token.json` (mode 0600); later runs refresh it silently. The
+scope is `gmail.readonly`.
+
 ## Configuration
 
 `~/.muster/config.toml`, all optional:
