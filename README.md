@@ -22,11 +22,16 @@ Set `MUSTER_HOME` to point all of that somewhere else.
 ## Setup
 
 ```sh
-python3.12 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+make install               # venv, deps, and the talon workaround below
 .venv/bin/muster init      # creates the db, applies migrations; safe to re-run
 .venv/bin/muster status
 ```
+
+Use `make install`, not a bare `pip install -e .`. talon's published metadata
+hard-requires `cchardet`, whose C extension cannot build on Python 3.11+, so
+talon has to go in with `--no-deps` alongside `faust-cchardet`. `pyproject.toml`
+lists talon's real dependencies by hand and explains why; the Makefile asserts
+afterwards that talon imports with its scikit-learn classifier switched off.
 
 ## Gmail
 
@@ -44,6 +49,35 @@ muster sync gmail --query "newer_than:7d" --limit 50
 The first run opens a browser for consent and caches a token at
 `~/.muster/gmail_token.json` (mode 0600); later runs refresh it silently. The
 scope is `gmail.readonly`.
+
+## Local mail
+
+No OAuth needed — useful for Takeout exports, and for exercising the parser:
+
+```sh
+muster sync mbox ~/takeout/All\ mail.mbox
+muster sync mbox tests/fixtures/sample.mbox
+```
+
+## What ingestion does
+
+Per message, in one transaction:
+
+1. The raw RFC822 bytes go to the blob store, content-addressed.
+2. `text/plain` wins; `text/html` is converted only when it is all there is.
+3. Quoted replies go (talon plus our own English and German openers), then a
+   conservative signature strip — a trailing block of ≤4 lines after a `--`
+   delimiter or a sign-off, removed only if it also holds a phone or URL.
+4. The body is chunked to ~512 tokens with 15% overlap on paragraph breaks.
+5. Attachments become blobs. Text-bearing ones (PDF via PyMuPDF, OCR via
+   `ocrmac` when there is no text layer) also become their own `docs` rows, so
+   an invoice is searchable in its own right. Their filenames are appended to
+   the parent's first chunk, because that is how people remember email.
+
+Re-running is a no-op: a message is identified by `(source, source_uid)`, and an
+existing row means the whole message is skipped. Malformed MIME, invented
+charsets and missing headers are logged to `docs.meta_json` and stepped over —
+a bad message never ends a run.
 
 ## Configuration
 
@@ -63,6 +97,9 @@ query = "newer_than:7d"
 model_id = "BAAI/bge-small-en-v1.5"
 batch_size = 64
 # device = "mps"           # default: autodetect
+
+[identity]
+addresses = ["you@example.com"]   # so `counterparty` names the other party
 ```
 
 ## Schema

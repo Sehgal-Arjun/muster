@@ -42,6 +42,9 @@ class Config:
     blob_dir: Path
     gmail: GmailConfig
     embed: EmbedConfig = field(default_factory=EmbedConfig)
+    # Your own addresses, so `counterparty` can name the other party rather
+    # than you. Empty is fine: outbound mail is then detected by label alone.
+    own_addresses: frozenset[str] = frozenset()
 
     def ensure_dirs(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
@@ -84,5 +87,8 @@ def load_config(home: Path | None = None) -> Config:
             model_id=embed.get("model_id", DEFAULT_EMBED_MODEL),
             batch_size=int(embed.get("batch_size", 64)),
             device=embed.get("device"),
+        ),
+        own_addresses=frozenset(
+            a.lower() for a in raw.get("identity", {}).get("addresses", [])
         ),
     )

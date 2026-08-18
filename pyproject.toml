@@ -18,10 +18,30 @@ gmail = [
     "google-api-python-client>=2.0",
     "google-auth-oauthlib>=1.2",
 ]
+# NOTE: `talon` is deliberately absent from this list, and must be installed
+# separately with --no-deps (see the Makefile and README).
+#
+# talon's metadata hard-requires `cchardet`, whose C extension does not build on
+# Python 3.11+ (it includes longintrepr.h, removed from CPython). Normal
+# resolution therefore fails outright. The fix is `faust-cchardet`, a maintained
+# fork that ships arm64 wheels and provides the same `import cchardet`, plus
+# talon's real dependencies listed by hand below.
+#
+# scipy and scikit-learn are NOT listed: they exist only for talon's signature
+# classifier (47 MB) which we do not use. talon/__init__.py catches the
+# ImportError and sets ML_ENABLED = False, so omitting them is supported. We
+# import talon.quotations only, and never call talon.init().
 parse = [
-    "talon>=1.6",
+    "faust-cchardet>=2.1.19",  # provides `import cchardet` for talon
+    "lxml>=2.3.3",             # ---- from here down: talon's real deps
+    "regex>=1",
+    "chardet>=1.0.1",
+    "cssselect",
+    "six>=1.10.0",
+    "html5lib",                # ---- end talon's deps
     "pymupdf>=1.24",
     "ocrmac>=1.0",
+    "pillow>=10",              # ocrmac takes PIL images
 ]
 embed = [
     "sentence-transformers>=3.0",

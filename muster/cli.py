@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -81,6 +82,62 @@ def status() -> None:
         typer.echo(f"{table:<13}{n}")
 
 
+def _require_db(cfg):
+    if not cfg.db_path.exists():
+        typer.echo(f"no database at {cfg.db_path} — run `muster init`", err=True)
+        raise typer.Exit(1)
+
+
+def _drain(connector, cfg, *, query: str | None, limit: int | None, quiet: bool) -> None:
+    """Pull everything a connector yields into the index.
+
+    One message per transaction, and every failure is logged and stepped over:
+    a single unparseable message must never cost the rest of the run.
+    """
+    from muster.ingest import ingest_message
+
+    conn = db.connect(cfg.db_path)
+    store = BlobStore(cfg.blob_dir)
+    seen = created = skipped = failed = attachment_docs = chunks = 0
+
+    try:
+        for message in connector.fetch(query, limit=limit):
+            seen += 1
+            try:
+                result = ingest_message(
+                    conn,
+                    store,
+                    source=connector.source,
+                    source_uid=message.source_uid,
+                    raw=message.raw,
+                    meta=message.meta,
+                    own_addresses=set(cfg.own_addresses),
+                )
+            except Exception as exc:
+                failed += 1
+                logging.getLogger("muster.sync").exception(
+                    "failed to ingest %s: %s", message.source_uid, exc
+                )
+                continue
+
+            if result.created:
+                created += 1
+                attachment_docs += result.attachment_docs
+                chunks += result.chunks
+                if not quiet:
+                    title = (result.warnings and "! " or "  ") + message.source_uid
+                    typer.echo(f"{title}  {result.chunks} chunks")
+            else:
+                skipped += 1
+    finally:
+        conn.close()
+
+    typer.echo(
+        f"\n{seen} seen, {created} new, {skipped} already indexed, {failed} failed"
+        f"\n{chunks} chunks, {attachment_docs} attachment docs"
+    )
+
+
 @sync_app.command("gmail")
 def sync_gmail(
     query: Annotated[
@@ -89,39 +146,43 @@ def sync_gmail(
     limit: Annotated[
         int | None, typer.Option("--limit", "-n", help="Stop after N messages.")
     ] = None,
+    quiet: Annotated[bool, typer.Option("--quiet", help="Summary only.")] = False,
 ) -> None:
-    """Fetch raw messages from Gmail into the blob store."""
+    """Fetch messages from Gmail and index them."""
     from muster.connectors.gmail import GmailAuthError, GmailConnector
 
     cfg = load_config()
     cfg.ensure_dirs()
-    if not cfg.db_path.exists():
-        typer.echo(f"no database at {cfg.db_path} — run `muster init`", err=True)
-        raise typer.Exit(1)
+    _require_db(cfg)
 
     connector = GmailConnector(cfg.gmail.credentials_path, cfg.gmail.token_path)
-    store = BlobStore(cfg.blob_dir)
-
-    fetched = new = total_bytes = 0
     try:
-        for message in connector.fetch(query or cfg.gmail.query, limit=limit):
-            digest_known = store.exists(BlobStore.digest_of(message.raw))
-            _, digest = store.put_blob(message.raw)
-            fetched += 1
-            total_bytes += len(message.raw)
-            new += 0 if digest_known else 1
-            typer.echo(
-                f"{message.source_uid}  {len(message.raw):>8}B  {digest[:12]}"
-                f"{'' if not digest_known else '  (already stored)'}"
-            )
+        _drain(connector, cfg, query=query or cfg.gmail.query, limit=limit, quiet=quiet)
     except GmailAuthError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
 
-    typer.echo(
-        f"\nfetched {fetched} messages ({total_bytes / 1e6:.1f} MB), "
-        f"{new} new blobs in {cfg.blob_dir}"
-    )
+
+@sync_app.command("mbox")
+def sync_mbox(
+    path: Annotated[Path, typer.Argument(help="An mbox file, Maildir, or .eml.")],
+    limit: Annotated[
+        int | None, typer.Option("--limit", "-n", help="Stop after N messages.")
+    ] = None,
+    quiet: Annotated[bool, typer.Option("--quiet", help="Summary only.")] = False,
+) -> None:
+    """Index a local mailbox — an mbox file, a Maildir, or a single .eml."""
+    from muster.connectors.mbox import MboxConnector
+
+    cfg = load_config()
+    cfg.ensure_dirs()
+    _require_db(cfg)
+
+    if not path.exists():
+        typer.echo(f"no such mailbox: {path}", err=True)
+        raise typer.Exit(1)
+
+    _drain(MboxConnector(path), cfg, query=None, limit=limit, quiet=quiet)
 
 
 if __name__ == "__main__":
