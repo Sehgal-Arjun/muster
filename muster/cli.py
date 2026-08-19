@@ -185,5 +185,63 @@ def sync_mbox(
     _drain(MboxConnector(path), cfg, query=None, limit=limit, quiet=quiet)
 
 
+@app.command()
+def search(
+    query: Annotated[str, typer.Argument(help="What to look for.")],
+    limit: Annotated[int, typer.Option("--limit", "-n", help="How many results.")] = 10,
+    since: Annotated[
+        str | None, typer.Option("--since", help="Only docs on or after this ISO date.")
+    ] = None,
+    until: Annotated[
+        str | None, typer.Option("--until", help="Only docs on or before this ISO date.")
+    ] = None,
+    source: Annotated[
+        str | None, typer.Option("--source", help="Restrict to one source.")
+    ] = None,
+    mode: Annotated[
+        str, typer.Option("--mode", help="keyword | vector | hybrid.")
+    ] = "keyword",
+    include_derived: Annotated[
+        bool, typer.Option("--include-derived", help="Also return derived docs.")
+    ] = False,
+) -> None:
+    """Search the index."""
+    from muster.search import search as run_search
+
+    cfg = load_config()
+    _require_db(cfg)
+
+    conn = db.connect(cfg.db_path)
+    try:
+        hits = run_search(
+            conn,
+            query,
+            mode=mode,
+            limit=limit,
+            since=since,
+            until=until,
+            source=source,
+            origin=None if include_derived else "captured",
+        )
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        conn.close()
+
+    if not hits:
+        typer.echo("no results")
+        return
+
+    for rank, hit in enumerate(hits, start=1):
+        title = hit.title or "(no title)"
+        typer.echo(
+            f"{rank:>2}. {typer.style(title[:72], bold=True)}"
+            f"\n    {hit.doc_date[:10]}  {hit.source}  {hit.counterparty or '-'}"
+            f"  score {hit.score:.3f}  doc {hit.doc_id}"
+            f"\n    {hit.snippet}"
+        )
+
+
 if __name__ == "__main__":
     app()
