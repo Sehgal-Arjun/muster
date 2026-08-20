@@ -243,5 +243,59 @@ def search(
         )
 
 
+@app.command("eval")
+def eval_cmd(
+    queries: Annotated[
+        Path, typer.Option("--queries", help="JSONL query file.")
+    ] = Path("eval/queries.jsonl"),
+    k: Annotated[int, typer.Option("--k", help="Cutoff for recall@k.")] = 10,
+    mode: Annotated[str, typer.Option("--mode", help="keyword | vector | hybrid.")] = "keyword",
+    results_dir: Annotated[
+        Path, typer.Option("--results-dir", help="Where to write the run.")
+    ] = Path("eval/results"),
+    show: Annotated[int, typer.Option("--show", help="Per-query lines to print.")] = 200,
+) -> None:
+    """Score retrieval against eval/queries.jsonl."""
+    from muster.evaluate import EvalError, evaluate, load_queries, write_run
+
+    cfg = load_config()
+    _require_db(cfg)
+
+    conn = db.connect(cfg.db_path)
+    try:
+        records = load_queries(queries)
+        run = evaluate(conn, records, mode=mode, k=k)
+    except (EvalError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        conn.close()
+
+    for result in run.results[:show]:
+        if not result.relevant:
+            marker, detail = typer.style("skip", fg="yellow"), "no resolvable ground truth"
+        elif result.first_relevant_rank:
+            marker = typer.style(" hit", fg="green")
+            detail = (
+                f"rank {result.first_relevant_rank}  "
+                f"recall {result.recall_at_k:.2f}  {len(result.hits)}/{len(result.relevant)}"
+            )
+        else:
+            marker, detail = typer.style("miss", fg="red"), f"0/{len(result.relevant)}"
+        typer.echo(f"{marker}  {result.q[:60]:<62}{detail}")
+        if result.unresolved:
+            typer.echo(f"        unresolved ids: {', '.join(map(str, result.unresolved))}")
+
+    path = write_run(run, results_dir)
+    typer.echo(
+        f"\nmode {run.mode}  k {run.k}"
+        f"\nrecall@{run.k}  {run.recall_at_k:.4f}"
+        f"\nMRR        {run.mrr:.4f}"
+        f"\nscored     {run.queries_scored}/{run.queries_total} queries"
+        f"  over {run.corpus['docs']} docs / {run.corpus['chunks']} chunks"
+        f"\nwrote      {path}"
+    )
+
+
 if __name__ == "__main__":
     app()

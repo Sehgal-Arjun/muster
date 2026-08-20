@@ -11,12 +11,30 @@ from __future__ import annotations
 import hashlib
 import logging
 import mailbox
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
 from muster.connectors import RawMessage
 
 log = logging.getLogger(__name__)
+
+
+_MESSAGE_ID_RE = re.compile(rb"^Message-ID:\s*<([^>\r\n]+)>", re.IGNORECASE | re.MULTILINE)
+
+
+def _uid_for(raw: bytes) -> str:
+    """A uid that survives moving the mailbox file.
+
+    Message-ID first, so the same message imported from two exports is one doc
+    and eval queries can name messages portably. Broken messages often lack
+    one, hence the content hash — which is still stable across re-runs, which
+    is what idempotency needs.
+    """
+    match = _MESSAGE_ID_RE.search(raw[:8192])
+    if match:
+        return match.group(1).decode("utf-8", errors="replace").strip()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 class MboxConnector:
@@ -56,11 +74,8 @@ class MboxConnector:
                     log.error("%s[%s]: unreadable (%s)", self.path, key, exc)
                     continue
 
-                # Message-ID would be nicer, but broken messages lack one and
-                # the uid has to be stable across re-runs for idempotency.
-                digest = hashlib.sha256(raw).hexdigest()
                 yield RawMessage(
-                    source_uid=f"{self.path}#{digest[:16]}",
+                    source_uid=_uid_for(raw),
                     raw=raw,
                     meta={"path": str(self.path), "mailbox_key": str(key)},
                 )

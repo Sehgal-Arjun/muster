@@ -147,6 +147,19 @@ def test_bare_terms_are_quoted_and_or_ed() -> None:
     assert build_match_query("invoice 2026") == '"invoice" OR "2026"'
 
 
+def test_punctuated_term_contributes_phrase_and_parts() -> None:
+    built = build_match_query("Rechnung_2026-0042.pdf")
+    assert built.startswith('"Rechnung 2026 0042 pdf"')
+    for part in ("Rechnung", "2026", "0042", "pdf"):
+        assert f'"{part}"' in built
+
+
+def test_filename_query_finds_both_the_email_and_the_attachment(indexed) -> None:
+    hits = keyword_search(indexed, "Rechnung_2026-0042.pdf")
+    found = set(titles(hits))
+    assert {"Rechnung 2026-0042", "Rechnung_2026-0042.pdf"} <= found
+
+
 def test_unknown_mode_is_rejected(indexed) -> None:
     with pytest.raises(ValueError, match="unknown search mode"):
         search(indexed, "x", mode="telepathy")

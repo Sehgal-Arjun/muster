@@ -1,0 +1,73 @@
+# Evaluation
+
+Retrieval changes are otherwise unfalsifiable. Chunk size, quote stripping,
+OR-vs-AND, the RRF constant — each of these either moves recall@10 and MRR on a
+real query set, or it does not, and without the numbers every future decision
+about retrieval is taste.
+
+```sh
+muster eval                                  # keyword, k=10
+muster eval --mode hybrid --k 10             # once M7 lands
+muster eval --queries eval/queries.jsonl --results-dir eval/results
+```
+
+Each run prints a per-query line and writes a timestamped JSON file to
+`eval/results/` (gitignored) holding the full retrieved list per query, so two
+runs can be diffed to see *which* queries moved rather than only the average.
+
+## The query file
+
+`queries.jsonl`, one JSON object per line:
+
+```json
+{"q": "warehouse lease renewal price", "relevant_doc_ids": ["msgid@example.com"], "note": "why this query is here"}
+```
+
+- **`q`** — what you would actually type. Do not write queries that read like
+  keyword lists; the point is to measure real use.
+- **`relevant_doc_ids`** — every document that genuinely answers the query.
+  Strings match `docs.source_uid` (for Gmail, the message id; for mbox, the
+  Message-ID). Integers match `docs.id`. **Prefer strings.** Row ids change when
+  the index is rebuilt, and a query file that silently rots is worse than none.
+  An attachment's own doc has the uid `<parent-uid>#att0`.
+- **`note`** — why the query is in the set, and what it is meant to stress. This
+  is the part you will thank yourself for in six months when a number moves.
+
+A record whose `relevant_doc_ids` resolve to nothing is **skipped, not scored
+zero**: averaging a zero for a record you have not filled in yet would damn the
+index for a reason that has nothing to do with retrieval. The summary line
+reports how many of the queries were actually scored.
+
+## Filling in the other 95
+
+There are five seed records here, all pointing at `tests/fixtures/sample.mbox`
+(`muster sync mbox tests/fixtures/sample.mbox` to make them resolve). They exist
+to show the format and to prove the harness works; they are not a benchmark —
+five queries over fifteen messages cannot tell you anything.
+
+The remaining ~95 have to come from you, by hand, against your real mail. A
+workable routine:
+
+1. Think of something you actually needed to find recently. Write the query the
+   way you would have typed it, before you knew the answer.
+2. `muster search "..."` and read the results.
+3. Find the documents that truly answer it — including any the search missed.
+   `muster search --limit 50`, date filters, and searching for a
+   remembered fragment all help. The ones retrieval *missed* are the valuable
+   records; a query set built only from what search already finds measures
+   nothing.
+4. Add the record with every relevant uid, and a note saying what it stresses.
+
+Aim for a spread rather than a hundred of the same shape:
+
+- **Literal** — a distinctive phrase you remember verbatim. BM25 should ace it.
+- **Paraphrase** — the idea, in words the message never used. Vectors should win.
+- **Entity** — a person, company, invoice number, address.
+- **Filename** — an attachment by name, and by its contents.
+- **Temporal** — "the quote from last spring", paired with `--since`/`--until`.
+- **Multilingual** — German queries against German mail, and cross-language.
+- **Multi-answer** — a thread or a recurring bill where several docs are relevant.
+- **Near-miss** — a query where an obvious wrong document competes.
+
+Record the recall@10 and MRR in the commit message whenever the number moves,
+along with what changed. The absolute value matters far less than the direction.

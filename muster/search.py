@@ -24,6 +24,9 @@ CANDIDATE_FACTOR = 6
 
 _TERM_RE = re.compile(r'"[^"]+"|\S+')
 _STRIP_RE = re.compile(r"^\W+|\W+$", re.UNICODE)
+# Mirrors what the unicode61 tokenizer does to the indexed text. Note the
+# excluded underscore: \w would keep "Rechnung_2026" whole, but FTS5 splits it.
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
 @dataclass
@@ -52,18 +55,38 @@ def build_match_query(query: str) -> str:
     tail and buys recall, which is the trade this index wants.
 
     Every term is quoted, so punctuation in a query is searched for rather than
-    interpreted as FTS5 syntax.
+    interpreted as FTS5 syntax. But quoting alone turns any punctuated term into
+    a strict phrase: "Rechnung_2026-0042.pdf" would only match documents with
+    those four tokens adjacent and in order, which finds the covering email and
+    misses the invoice itself. So a punctuated term contributes both the phrase
+    — which ranks an exact filename match highest — and its parts.
+
+    A term the user quoted explicitly stays a strict phrase. That is what the
+    quotes are for.
     """
     terms: list[str] = []
+    seen: set[str] = set()
+
+    def push(expression: str) -> None:
+        if expression not in seen:
+            seen.add(expression)
+            terms.append(expression)
+
     for raw in _TERM_RE.findall(query or ""):
         if raw.startswith('"') and raw.endswith('"') and len(raw) > 1:
-            phrase = raw[1:-1].replace('"', "")
-            if phrase.strip():
-                terms.append(f'"{phrase.strip()}"')
+            phrase = " ".join(_WORD_RE.findall(raw[1:-1]))
+            if phrase:
+                push(f'"{phrase}"')
             continue
-        cleaned = _STRIP_RE.sub("", raw)
-        if cleaned:
-            terms.append('"' + cleaned.replace('"', "") + '"')
+
+        parts = _WORD_RE.findall(_STRIP_RE.sub("", raw))
+        if not parts:
+            continue
+        if len(parts) > 1:
+            push('"' + " ".join(parts) + '"')
+        for part in parts:
+            push(f'"{part}"')
+
     return " OR ".join(terms)
 
 
