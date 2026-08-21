@@ -186,6 +186,61 @@ def sync_mbox(
 
 
 @app.command()
+def embed(
+    model: Annotated[
+        str | None, typer.Option("--model", help="Override the configured model id.")
+    ] = None,
+    batch_size: Annotated[
+        int | None, typer.Option("--batch-size", help="Texts per forward pass.")
+    ] = None,
+    device: Annotated[
+        str | None, typer.Option("--device", help="mps | cpu | cuda. Default: autodetect.")
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option("--limit", "-n", help="Stop after N distinct texts.")
+    ] = None,
+) -> None:
+    """Embed chunks that have no vector for the current model. Resumable."""
+    from muster.embed import count_pending, embed_pending
+
+    cfg = load_config()
+    _require_db(cfg)
+    model_id = model or cfg.embed.model_id
+
+    conn = db.connect(cfg.db_path)
+    try:
+        pending = count_pending(conn, model_id)
+        if not pending:
+            typer.echo(f"nothing to do — every chunk has a vector for {model_id}")
+            return
+        typer.echo(f"{pending} chunks pending for {model_id}")
+
+        def report_progress(report, total: int) -> None:
+            typer.echo(
+                f"\r  {report.groups}/{total} texts  {report.chunks} vectors"
+                f"  batch {report.batches}",
+                nl=False,
+            )
+
+        report = embed_pending(
+            conn,
+            model_id=model_id,
+            device=device or cfg.embed.device,
+            batch_size=batch_size or cfg.embed.batch_size,
+            limit=limit,
+            progress=report_progress,
+        )
+    finally:
+        conn.close()
+
+    typer.echo(
+        f"\n{report.chunks} vectors written from {report.groups} distinct texts"
+        f" in {report.batches} batches"
+        f"\nmodel {report.model_id}  device {report.device}  dim {report.dimensions}"
+    )
+
+
+@app.command()
 def search(
     query: Annotated[str, typer.Argument(help="What to look for.")],
     limit: Annotated[int, typer.Option("--limit", "-n", help="How many results.")] = 10,

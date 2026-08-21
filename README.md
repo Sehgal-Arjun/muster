@@ -79,6 +79,50 @@ existing row means the whole message is skipped. Malformed MIME, invented
 charsets and missing headers are logged to `docs.meta_json` and stepped over —
 a bad message never ends a run.
 
+## Search
+
+```sh
+muster search "warehouse lease renewal" --limit 10 --since 2026-01-01
+muster search "..." --mode keyword | vector | hybrid
+```
+
+- **keyword** — BM25 over FTS5. Terms are OR-ed, and a punctuated term
+  contributes both its phrase and its parts, so `Rechnung_2026-0042.pdf` finds
+  the covering email *and* the invoice.
+- **vector** — `bge-small-en-v1.5` via sqlite-vec cosine distance. Needs
+  `muster embed` first.
+- **hybrid** — both arms fused with Reciprocal Rank Fusion at k=60. Falls back
+  to keyword alone when nothing is embedded.
+
+All three stay available so they remain comparable under `muster eval`; a mode
+that cannot be measured against the others is a mode nobody can reason about.
+
+```sh
+make install-embed        # adds sentence-transformers (pulls torch)
+muster embed              # resumable; skips chunks that already have a vector
+```
+
+`muster embed` is safe to interrupt — each batch commits — and identical chunk
+text is encoded once and written for every chunk that shares its `text_hash`.
+Switching models inserts alongside the old vectors rather than replacing them.
+
+### Where it stands
+
+On the 15-message fixture corpus (5 seed queries, k=10):
+
+| mode | recall@10 | MRR |
+|---|---|---|
+| keyword | 0.8000 | 0.8000 |
+| vector | **1.0000** | **0.8333** |
+| hybrid | 0.8000 | 0.8000 |
+
+Do not read much into this. Five queries over sixteen documents measures
+almost nothing, and hybrid is being punished by an artefact of the tiny corpus:
+the one query keyword misses is answered by the vector arm at rank 6, and with
+only sixteen documents the keyword arm's confident noise outranks it in the
+fusion. Tuning the RRF constant against five queries would be overfitting.
+The number that matters is the one after `eval/queries.jsonl` is filled in.
+
 ## Configuration
 
 `~/.muster/config.toml`, all optional:
