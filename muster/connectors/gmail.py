@@ -98,6 +98,11 @@ class GmailConnector:
         self.credentials_path = Path(credentials_path)
         self.token_path = Path(token_path)
         self._service = service
+        # A message Gmail listed but we could not fetch never reaches the
+        # caller, so without these counters it would vanish from the run
+        # summary entirely and look like it was never there.
+        self.listed = 0
+        self.dropped: list[tuple[str, str]] = []
 
     @property
     def service(self):
@@ -122,6 +127,7 @@ class GmailConnector:
             )
             for item in response.get("messages", []):
                 yield item["id"]
+                self.listed += 1
                 seen += 1
                 if limit is not None and seen >= limit:
                     return
@@ -131,6 +137,8 @@ class GmailConnector:
 
     def fetch(self, query: str | None = None, *, limit: int | None = None) -> Iterator[RawMessage]:
         query = query or DEFAULT_QUERY
+        self.listed = 0
+        self.dropped = []
         messages = self.service.users().messages()
 
         for message_id in self.list_ids(query, limit):
@@ -144,11 +152,13 @@ class GmailConnector:
             except Exception as exc:
                 # One unfetchable message must not end the run.
                 log.error("skipping %s: %s", message_id, exc)
+                self.dropped.append((message_id, str(exc)))
                 continue
 
             raw = payload.get("raw")
             if not raw:
                 log.error("skipping %s: no raw payload", message_id)
+                self.dropped.append((message_id, "no raw payload"))
                 continue
 
             yield RawMessage(

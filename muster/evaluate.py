@@ -7,13 +7,23 @@ Queries live in ``eval/queries.jsonl``, one JSON object per line::
 
     {"q": "...", "relevant_doc_ids": [...], "note": "..."}
 
-``relevant_doc_ids`` accepts integers (matched against ``docs.id``) or strings
-(matched against ``docs.source_uid``). Prefer strings: row ids change when the
-index is rebuilt, and a query file that silently rots is worse than none.
+``relevant_doc_ids`` holds strings only. Row ids are rejected outright: they
+change whenever the index is rebuilt, and a query file that silently rots is
+worse than no query file. Three forms are accepted:
+
+    "gmail:19fe48042d9ff694"   source-qualified, the unambiguous form
+    "19fe48042d9ff694"         bare source_uid, if unique across sources
+    "sha256:<content_hash>"    the raw bytes, stable even if uids change
+
+Runs are scored against a pinned corpus so numbers are comparable over time.
+``muster corpus snapshot`` freezes the index; ``muster eval --corpus`` scores
+against the snapshot, and every results file records the corpus fingerprint it
+was measured on.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -31,7 +41,7 @@ DEFAULT_K = 10
 @dataclass
 class QueryRecord:
     q: str
-    relevant_doc_ids: list[int | str] = field(default_factory=list)
+    relevant_doc_ids: list[str] = field(default_factory=list)
     note: str = ""
 
 
@@ -51,6 +61,18 @@ class QueryResult:
 
 
 @dataclass
+class Corpus:
+    """What the numbers were measured on. Without this they mean nothing."""
+
+    path: str
+    fingerprint: str
+    docs: int
+    chunks: int
+    vectors: int
+    excluded_categories: list[str]
+
+
+@dataclass
 class EvalRun:
     mode: str
     k: int
@@ -60,7 +82,7 @@ class EvalRun:
     recall_at_k: float
     mrr: float
     results: list[QueryResult]
-    corpus: dict[str, int]
+    corpus: Corpus
 
     def to_json(self) -> str:
         payload = asdict(self)
@@ -87,37 +109,109 @@ def load_queries(path: Path) -> list[QueryRecord]:
             raise EvalError(f"{path}:{lineno}: not valid JSON ({exc})") from exc
         if not isinstance(raw, dict) or "q" not in raw:
             raise EvalError(f"{path}:{lineno}: every record needs a 'q' field")
+
+        ids = list(raw.get("relevant_doc_ids") or [])
+        numeric = [i for i in ids if isinstance(i, int) and not isinstance(i, bool)]
+        if numeric:
+            raise EvalError(
+                f"{path}:{lineno}: relevant_doc_ids must be strings, got row ids "
+                f"{numeric}. Row ids change when the index is rebuilt — use a "
+                f"source_uid ('gmail:19fe48...') or 'sha256:<content_hash>'."
+            )
         records.append(
             QueryRecord(
                 q=str(raw["q"]),
-                relevant_doc_ids=list(raw.get("relevant_doc_ids") or []),
+                relevant_doc_ids=[str(i) for i in ids],
                 note=str(raw.get("note", "")),
             )
         )
     return records
 
 
+KNOWN_SOURCES = ("gmail", "file", "outlook", "imap")
+
+
+def _lookup(conn: sqlite3.Connection, value: str) -> list[int]:
+    """Every doc a query-file identifier could mean."""
+    if value.startswith("sha256:"):
+        rows = conn.execute(
+            "SELECT id FROM docs WHERE content_hash = ?", (value[len("sha256:") :],)
+        ).fetchall()
+        return [int(r[0]) for r in rows]
+
+    source, _, uid = value.partition(":")
+    if uid and source in KNOWN_SOURCES:
+        rows = conn.execute(
+            "SELECT id FROM docs WHERE source = ? AND source_uid = ?", (source, uid)
+        ).fetchall()
+        return [int(r[0]) for r in rows]
+
+    rows = conn.execute("SELECT id FROM docs WHERE source_uid = ?", (value,)).fetchall()
+    return [int(r[0]) for r in rows]
+
+
 def resolve_relevant(
-    conn: sqlite3.Connection, ids: list[int | str]
+    conn: sqlite3.Connection, ids: list[str]
 ) -> tuple[list[int], list[str]]:
-    """Map a record's ids to live doc ids, reporting the ones that do not exist."""
+    """Map identifiers to live doc ids, reporting the ones that do not resolve."""
     resolved: list[int] = []
     unresolved: list[str] = []
     for value in ids:
-        if isinstance(value, bool):
-            unresolved.append(repr(value))
-        elif isinstance(value, int):
-            row = conn.execute("SELECT id FROM docs WHERE id = ?", (value,)).fetchone()
-            (resolved if row else unresolved).append(value if row else str(value))
+        matches = _lookup(conn, str(value))
+        if not matches:
+            unresolved.append(str(value))
+        elif len(matches) > 1:
+            # Ambiguity is a bug in the query file, not a retrieval result.
+            unresolved.append(f"{value} (ambiguous: {len(matches)} docs)")
         else:
-            row = conn.execute(
-                "SELECT id FROM docs WHERE source_uid = ?", (str(value),)
-            ).fetchone()
-            if row:
-                resolved.append(int(row[0]))
-            else:
-                unresolved.append(str(value))
+            resolved.append(matches[0])
     return resolved, unresolved
+
+
+def corpus_fingerprint(conn: sqlite3.Connection) -> str:
+    """Identity of the indexed set, independent of row ids and file layout.
+
+    Hashes the captured documents' (source, source_uid, content_hash) triples in
+    sorted order. Two indexes holding the same mail fingerprint identically even
+    if they were built in a different order — and a fingerprint that changes
+    between runs is the signal that the numbers are not comparable.
+    """
+    digest = hashlib.sha256()
+    rows = conn.execute(
+        "SELECT source, source_uid, content_hash FROM docs"
+        " WHERE origin = 'captured' ORDER BY source, source_uid"
+    )
+    for source, source_uid, content_hash in rows:
+        digest.update(f"{source}\x1f{source_uid}\x1f{content_hash}\x1e".encode())
+    return digest.hexdigest()[:16]
+
+
+def describe_corpus(
+    conn: sqlite3.Connection, path: str, excluded: frozenset[str] | None = None
+) -> Corpus:
+    def count(sql: str) -> int:
+        return conn.execute(sql).fetchone()[0]
+
+    return Corpus(
+        path=str(path),
+        fingerprint=corpus_fingerprint(conn),
+        docs=count("SELECT count(*) FROM docs WHERE origin='captured'"),
+        chunks=count("SELECT count(*) FROM chunks"),
+        vectors=count("SELECT count(*) FROM vectors"),
+        excluded_categories=sorted(excluded or ()),
+    )
+
+
+def snapshot(conn: sqlite3.Connection, destination: Path) -> Path:
+    """Freeze the index to a standalone file using SQLite's backup API."""
+    destination = Path(destination).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    target = sqlite3.connect(destination)
+    try:
+        conn.backup(target)
+    finally:
+        target.close()
+    return destination
 
 
 def evaluate(
@@ -126,6 +220,8 @@ def evaluate(
     *,
     mode: str = "keyword",
     k: int = DEFAULT_K,
+    corpus_path: str = "",
+    exclude_categories: frozenset[str] | None = None,
 ) -> EvalRun:
     results: list[QueryResult] = []
     recalls: list[float] = []
@@ -133,7 +229,10 @@ def evaluate(
 
     for record in records:
         relevant, unresolved = resolve_relevant(conn, record.relevant_doc_ids)
-        hits = search(conn, record.q, mode=mode, limit=k)
+        hits = search(
+            conn, record.q, mode=mode, limit=k,
+            **({} if exclude_categories is None else {"exclude_categories": exclude_categories}),
+        )
         retrieved = [h.doc_id for h in hits]
 
         relevant_set = set(relevant)
@@ -170,12 +269,6 @@ def evaluate(
             )
         )
 
-    corpus = {
-        "docs": conn.execute("SELECT count(*) FROM docs WHERE origin='captured'").fetchone()[0],
-        "chunks": conn.execute("SELECT count(*) FROM chunks").fetchone()[0],
-        "vectors": conn.execute("SELECT count(*) FROM vectors").fetchone()[0],
-    }
-
     return EvalRun(
         mode=mode,
         k=k,
@@ -185,7 +278,7 @@ def evaluate(
         recall_at_k=round(sum(recalls) / len(recalls), 4) if recalls else 0.0,
         mrr=round(sum(rrs) / len(rrs), 4) if rrs else 0.0,
         results=results,
-        corpus=corpus,
+        corpus=describe_corpus(conn, corpus_path, exclude_categories),
     )
 
 
@@ -193,6 +286,6 @@ def write_run(run: EvalRun, results_dir: Path) -> Path:
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     stamp = run.started_at.replace(":", "").replace("-", "").split(".")[0]
-    path = results_dir / f"{stamp}-{run.mode}-k{run.k}.json"
+    path = results_dir / f"{stamp}-{run.mode}-k{run.k}-{run.corpus.fingerprint}.json"
     path.write_text(run.to_json(), encoding="utf-8")
     return path

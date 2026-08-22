@@ -52,7 +52,7 @@ def test_loads_the_seed_query_file() -> None:
 
 def test_blank_lines_and_comments_are_skipped(tmp_path: Path) -> None:
     path = tmp_path / "q.jsonl"
-    path.write_text('\n# a comment\n{"q": "x", "relevant_doc_ids": [1]}\n\n')
+    path.write_text('\n# a comment\n{"q": "x", "relevant_doc_ids": ["gmail:abc"]}\n\n')
     assert len(load_queries(path)) == 1
 
 
@@ -85,16 +85,43 @@ def test_source_uids_resolve_to_row_ids(indexed) -> None:
     assert title == "Re: Q2 warehouse lease renewal"
 
 
-def test_integer_ids_resolve_too(indexed) -> None:
-    doc_id = indexed.execute("SELECT id FROM docs LIMIT 1").fetchone()[0]
-    resolved, unresolved = resolve_relevant(indexed, [doc_id])
-    assert resolved == [doc_id] and not unresolved
+def test_row_ids_in_the_query_file_are_rejected(tmp_path: Path) -> None:
+    """Row ids change when the index is rebuilt; a file using them rots silently."""
+    path = tmp_path / "q.jsonl"
+    path.write_text('{"q": "x", "relevant_doc_ids": [14]}\n')
+    with pytest.raises(EvalError, match="must be strings"):
+        load_queries(path)
+
+
+def test_source_qualified_ids_resolve(indexed) -> None:
+    resolved, unresolved = resolve_relevant(indexed, ["file:ordinary-1@example.com"])
+    assert len(resolved) == 1 and not unresolved
+
+
+def test_content_hash_ids_resolve(indexed) -> None:
+    digest = indexed.execute(
+        "SELECT content_hash FROM docs WHERE source_uid = 'ordinary-1@example.com'"
+    ).fetchone()[0]
+    resolved, unresolved = resolve_relevant(indexed, [f"sha256:{digest}"])
+    assert len(resolved) == 1 and not unresolved
+
+
+def test_ambiguous_uid_is_reported_rather_than_guessed(indexed) -> None:
+    """The same uid under two sources is a query-file bug, not a retrieval miss."""
+    indexed.execute(
+        "INSERT INTO docs (source, source_uid, content_hash, doc_date, date_source,"
+        " ingested_at) VALUES ('gmail', 'ordinary-1@example.com', 'h2',"
+        " '2026-01-01T00:00:00Z', 'header', '2026-01-01T00:00:00Z')"
+    )
+    resolved, unresolved = resolve_relevant(indexed, ["ordinary-1@example.com"])
+    assert resolved == []
+    assert "ambiguous" in unresolved[0]
 
 
 def test_unknown_ids_are_reported_not_dropped(indexed) -> None:
-    resolved, unresolved = resolve_relevant(indexed, ["nope@nowhere", 99999])
+    resolved, unresolved = resolve_relevant(indexed, ["nope@nowhere", "gmail:missing"])
     assert resolved == []
-    assert set(unresolved) == {"nope@nowhere", "99999"}
+    assert set(unresolved) == {"nope@nowhere", "gmail:missing"}
 
 
 # --- scoring --------------------------------------------------------------
@@ -163,6 +190,7 @@ def test_run_is_written_as_readable_json(indexed, tmp_path: Path) -> None:
     assert payload["mode"] == "keyword"
     assert payload["recall_at_k"] == 1.0
     assert payload["corpus"]["docs"] > 0
+    assert payload["corpus"]["fingerprint"], "a run without a corpus identity is not comparable"
     # The retrieved list per query is what makes two runs diffable.
     assert payload["results"][0]["retrieved"]
 

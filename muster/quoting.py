@@ -91,6 +91,11 @@ _SIGNATURE_SEARCH_WINDOW = 12  # lines from the end worth considering
 
 def strip_quotes(text: str) -> str:
     """Remove quoted originals from a plain-text body."""
+    from muster.textclean import strip_invisibles
+
+    # Invisibles go first: they break the line anchors the openers rely on, but
+    # removing them cannot change line structure the way full cleaning would.
+    text = strip_invisibles(text)
     if not text.strip():
         return text
 
@@ -114,7 +119,9 @@ def strip_quotes_html(html: str) -> str:
         log.debug("talon extract_from_html failed (%s); converting raw html", exc)
         stripped = html
 
-    return _truncate_at_quote(html_to_text(stripped))
+    from muster.textclean import strip_invisibles
+
+    return _truncate_at_quote(strip_invisibles(html_to_text(stripped)))
 
 
 def _truncate_at_quote(text: str) -> str:
@@ -174,42 +181,27 @@ def strip_signature(text: str) -> tuple[str, str | None]:
 
 
 def html_to_text(html: str) -> str:
-    """HTML to plain text, via talon's converter with a crude regex fallback."""
-    if not html.strip():
-        return ""
-    try:
-        from talon.utils import html_to_text as _talon_html_to_text
+    """HTML to plain text. See :mod:`muster.htmltext` for why not talon's."""
+    from muster.htmltext import html_to_text as _html_to_text
 
-        out = _talon_html_to_text(html)
-        if isinstance(out, bytes):
-            out = out.decode("utf-8", errors="replace")
-        if out and out.strip():
-            return _collapse_blank_lines(out)
-    except Exception as exc:
-        log.debug("talon html_to_text failed (%s); using regex fallback", exc)
-
-    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", html)
-    text = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>|</h[1-6]>", "\n", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = _unescape(text)
-    return _collapse_blank_lines(text)
-
-
-def _unescape(text: str) -> str:
-    import html as html_module
-
-    return html_module.unescape(text)
+    return _html_to_text(html)
 
 
 def _collapse_blank_lines(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r" *\n *", "\n", text)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
+    from muster.textclean import collapse_whitespace
+
+    return collapse_whitespace(text)
 
 
 def clean_body(text: str, *, is_html: bool = False) -> str:
-    """The full reduction: quotes out, signature out, whitespace normalised."""
+    """The full reduction: quotes out, signature out, text normalised.
+
+    Normalisation runs last so that quote and signature detection still see the
+    original line structure — collapsing whitespace first would merge the very
+    line breaks those heuristics anchor on.
+    """
+    from muster.textclean import clean_text
+
     text = strip_quotes_html(text) if is_html else strip_quotes(text)
     body, _signature = strip_signature(text)
-    return _collapse_blank_lines(body)
+    return clean_text(body)

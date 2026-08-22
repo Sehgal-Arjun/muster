@@ -59,6 +59,59 @@ muster sync mbox ~/takeout/All\ mail.mbox
 muster sync mbox tests/fixtures/sample.mbox
 ```
 
+## Cleaning
+
+Marketing email is the adversary. Before chunking, extracted text has:
+
+- **Invisible characters removed** — zero-width space/joiner/non-joiner, soft
+  hyphen, BOM, word joiner. Preheader padding runs to 900 of them in one chunk.
+  Bidi marks are deliberately left alone; stripping all of Cf would corrupt
+  right-to-left text.
+- **URLs reduced to their registrable domain** —
+  `click.email.bananarepublicfactory.com/?qs=<200 chars of base64>` becomes
+  `bananarepublicfactory.com`, so domain queries still hit but BM25 term
+  statistics and embeddings are not swamped. Runs of the same domain collapse.
+- **Low-content chunks dropped** — too few alphanumerics, or too much
+  punctuation. A document left with nothing falls back to a chunk built from
+  its subject, because `docs.title` is not in the FTS index and a document with
+  no chunks matches no query. `muster status` reports the count of such
+  documents, since that is how a parser regression hides.
+
+HTML is converted with lxml, not talon: talon refuses any document over 419
+tags — two thirds of real mail — and returned `None`, so almost every
+promotional message fell through to a regex fallback that could not see
+conditional comments. Office metadata leaked in as bare text.
+
+## Gmail categories
+
+Label IDs are stored in `docs.meta_json`, and the single most exclusion-worthy
+`CATEGORY_*` is denormalised into the indexed `docs.category` column. Retrieval
+hides `promotions` and `social` by default; `updates` stays, because receipts
+and shipping notices live there.
+
+```sh
+muster sync gmail --exclude-categories promotions,social   # keep them out entirely
+muster search "..." --all-categories                       # look at everything
+muster search "..." --exclude-categories promotions        # or pick
+```
+
+## Reparse
+
+Ingest is idempotent on `(source, source_uid)` — which is what makes a crashed
+sync safe to re-run, and what stops a parser fix from ever reaching mail that is
+already indexed.
+
+```sh
+muster reparse              # re-derive from stored originals; no re-fetching
+muster reparse --force      # rebuild even where the text is unchanged
+muster embed                # fill vectors for whatever was rebuilt
+```
+
+Documents whose rebuilt chunks hash identically are left completely untouched,
+which makes the command both cheap to re-run and resumable after an interrupt.
+Where chunks *are* rebuilt, vectors are carried across by `text_hash`, so a fix
+touching one message in fifty does not cost forty-nine re-embeddings.
+
 ## What ingestion does
 
 Per message, in one transaction:
@@ -108,7 +161,7 @@ Switching models inserts alongside the old vectors rather than replacing them.
 
 ### Where it stands
 
-On the 15-message fixture corpus (5 seed queries, k=10):
+Fixture corpus `c0d32bf34acd4319` (16 docs), 5 seed queries, k=10:
 
 | mode | recall@10 | MRR |
 |---|---|---|
@@ -122,6 +175,11 @@ the one query keyword misses is answered by the vector arm at rank 6, and with
 only sixteen documents the keyword arm's confident noise outranks it in the
 fusion. Tuning the RRF constant against five queries would be overfitting.
 The number that matters is the one after `eval/queries.jsonl` is filled in.
+
+**Always compare runs with the same corpus fingerprint.** The same five queries
+over a real 831-document index score 0.8000/0.8000 in every mode — not a
+regression, just a harder corpus. Comparing across fingerprints measures the
+mailbox, not the retrieval.
 
 ## Configuration
 

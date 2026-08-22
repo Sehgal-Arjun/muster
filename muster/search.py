@@ -16,6 +16,8 @@ import re
 import sqlite3
 from dataclasses import dataclass
 
+from muster.categories import DEFAULT_EXCLUDED
+
 DEFAULT_LIMIT = 10
 # Chunks to consider before collapsing to documents. A long document can hold
 # several matching chunks, so the chunk-level cut has to be wider than the
@@ -105,6 +107,7 @@ def keyword_search(
     until: str | None = None,
     origin: str | None = "captured",
     source: str | None = None,
+    exclude_categories=DEFAULT_EXCLUDED,
 ) -> list[Hit]:
     match = build_match_query(query)
     if not match:
@@ -121,19 +124,9 @@ def keyword_search(
         JOIN docs   d ON d.id = c.doc_id
         WHERE chunks_fts MATCH :match
     """
-    params: dict[str, object] = {"match": match, "n": max(limit, 1) * CANDIDATE_FACTOR}
-    if origin is not None:
-        sql += " AND d.origin = :origin"
-        params["origin"] = origin
-    if since:
-        sql += " AND d.doc_date >= :since"
-        params["since"] = since
-    if until:
-        sql += " AND d.doc_date <= :until"
-        params["until"] = until
-    if source:
-        sql += " AND d.source = :source"
-        params["source"] = source
+    where, params = _filter_clause(origin, since, until, source, exclude_categories)
+    sql += where
+    params |= {"match": match, "n": max(limit, 1) * CANDIDATE_FACTOR}
     # bm25() is negative, most relevant first.
     sql += " ORDER BY score ASC LIMIT :n"
 
@@ -169,13 +162,25 @@ def _collapse_to_docs(rows, limit: int) -> list[Hit]:
 
 
 def _filter_clause(
-    origin: str | None, since: str | None, until: str | None, source: str | None
+    origin: str | None,
+    since: str | None,
+    until: str | None,
+    source: str | None,
+    exclude_categories=None,
 ) -> tuple[str, dict[str, object]]:
     sql = ""
     params: dict[str, object] = {}
     if origin is not None:
         sql += " AND d.origin = :origin"
         params["origin"] = origin
+    if exclude_categories:
+        # NULL is "not categorised" — every non-Gmail document and all ordinary
+        # correspondence — so it must always pass.
+        names = sorted(exclude_categories)
+        keys = [f"cat{i}" for i in range(len(names))]
+        placeholders = ", ".join(f":{key}" for key in keys)
+        sql += f" AND (d.category IS NULL OR d.category NOT IN ({placeholders}))"
+        params.update(dict(zip(keys, names, strict=True)))
     if since:
         sql += " AND d.doc_date >= :since"
         params["since"] = since
@@ -198,6 +203,7 @@ def vector_search(
     until: str | None = None,
     origin: str | None = "captured",
     source: str | None = None,
+    exclude_categories=DEFAULT_EXCLUDED,
 ) -> list[Hit]:
     """Nearest neighbours by cosine distance, using sqlite-vec on the vectors table."""
     from muster.config import load_config
@@ -218,7 +224,7 @@ def vector_search(
     load_sqlite_vec(conn)
     embedding = pack(encode_query(load_model(model_id, cfg.embed.device), query))
 
-    where, params = _filter_clause(origin, since, until, source)
+    where, params = _filter_clause(origin, since, until, source, exclude_categories)
     params |= {
         "embedding": embedding,
         "model": model_id,

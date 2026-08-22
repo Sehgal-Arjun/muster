@@ -22,10 +22,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from muster.blobs import BlobStore
+from muster.categories import category_of
 from muster.chunking import chunk_text
 from muster.db import transaction
 from muster.extract import extract_text, is_text_bearing
-from muster.parser import ParsedAttachment, ParsedMessage, parse_message
+from muster.parser import NO_SUBJECT, ParsedAttachment, ParsedMessage, parse_message
+from muster.textclean import clean_text, filter_chunks
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +69,23 @@ def _insert_chunks(conn: sqlite3.Connection, doc_id: int, texts: list[str]) -> i
     return len(rows)
 
 
+def build_chunks(parsed: ParsedMessage) -> list[str]:
+    """The body's chunk texts: split, filenames attached, junk dropped."""
+    chunks = _annotate_with_filenames(chunk_text(parsed.body), parsed.attachments)
+    chunks = filter_chunks(chunks)
+    if chunks:
+        return chunks
+
+    # An image-only newsletter, or a body we could not read, still has a
+    # subject — and docs.title is not in the FTS index, so with no chunks the
+    # document is invisible to every query. One chunk from the header line is
+    # the difference between findable and gone.
+    header = " ".join(
+        part for part in (parsed.title, parsed.counterparty) if part and part != NO_SUBJECT
+    ).strip()
+    return [header] if header else []
+
+
 def _annotate_with_filenames(chunks: list[str], attachments: list[ParsedAttachment]) -> list[str]:
     """Put attachment filenames in the first chunk so filename queries hit.
 
@@ -105,7 +124,7 @@ def ingest_message(
     # The original goes to the blob store before anything references it.
     blob_path, content_hash = store.put_blob(raw)
 
-    body_chunks = _annotate_with_filenames(chunk_text(parsed.body), parsed.attachments)
+    body_chunks = build_chunks(parsed)
 
     with transaction(conn):
         # Re-check inside the transaction: a concurrent worker may have won.
@@ -151,8 +170,9 @@ def _insert_doc(
         """
         INSERT INTO docs (
             source, source_uid, origin, content_hash, blob_path, mime, title,
-            doc_date, date_source, counterparty, thread_uid, meta_json, ingested_at
-        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            doc_date, date_source, counterparty, thread_uid, meta_json,
+            category, ingested_at
+        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source,
@@ -166,10 +186,30 @@ def _insert_doc(
             parsed.counterparty,
             parsed.thread_uid,
             json.dumps({**parsed.headers, **meta_extra}, default=str),
+            category_of(parsed.headers.get("labels")),
             _now(),
         ),
     )
     return int(cursor.lastrowid)
+
+
+def attachment_plan(parsed: ParsedMessage) -> list[list[str]]:
+    """The chunks each attachment would contribute, in attachment order.
+
+    Extraction is pure given the bytes, so reparse can compute this and compare
+    it against what is stored to decide whether a rebuild is needed at all.
+    """
+    plan: list[list[str]] = []
+    for attachment in parsed.attachments:
+        chunks: list[str] = []
+        if is_text_bearing(attachment.mime, attachment.filename):
+            # Attachment text needs the same normalisation as a message body:
+            # PDFs carry zero-width characters and tracking URLs too.
+            text = clean_text(extract_text(attachment.data, attachment.mime, attachment.filename))
+            if text.strip():
+                chunks = filter_chunks(chunk_text(text))
+        plan.append(chunks)
+    return plan
 
 
 def _ingest_attachments(
@@ -180,7 +220,10 @@ def _ingest_attachments(
     source: str,
 ) -> int:
     created = 0
-    for index, attachment in enumerate(parsed.attachments):
+    plan = attachment_plan(parsed)
+    for index, (attachment, child_chunks) in enumerate(
+        zip(parsed.attachments, plan, strict=True)
+    ):
         try:
             blob_path, content_hash = store.put_blob(attachment.data)
         except OSError as exc:
@@ -188,21 +231,19 @@ def _ingest_attachments(
             continue
 
         child_id = None
-        if is_text_bearing(attachment.mime, attachment.filename):
-            text = extract_text(attachment.data, attachment.mime, attachment.filename)
-            if text.strip():
-                child_id = _insert_attachment_doc(
-                    conn,
-                    store_path=blob_path,
-                    content_hash=content_hash,
-                    attachment=attachment,
-                    parent=parsed,
-                    parent_uid=parsed.source_uid,
-                    index=index,
-                    source=source,
-                    text=text,
-                )
-                created += 1
+        if child_chunks:
+            child_id = _insert_attachment_doc(
+                conn,
+                store_path=blob_path,
+                content_hash=content_hash,
+                attachment=attachment,
+                parent=parsed,
+                parent_uid=parsed.source_uid,
+                index=index,
+                source=source,
+                chunks=child_chunks,
+            )
+            created += 1
 
         conn.execute(
             """
@@ -225,7 +266,7 @@ def _insert_attachment_doc(
     parent_uid: str,
     index: int,
     source: str,
-    text: str,
+    chunks: list[str],
 ) -> int:
     child_uid = f"{parent_uid}#att{index}"
     if (existing := existing_doc_id(conn, source, child_uid)) is not None:
@@ -235,8 +276,9 @@ def _insert_attachment_doc(
         """
         INSERT INTO docs (
             source, source_uid, origin, content_hash, blob_path, mime, title,
-            doc_date, date_source, counterparty, thread_uid, meta_json, ingested_at
-        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            doc_date, date_source, counterparty, thread_uid, meta_json,
+            category, ingested_at
+        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source,
@@ -257,9 +299,10 @@ def _insert_attachment_doc(
                 },
                 default=str,
             ),
+            category_of(parent.headers.get("labels")),
             _now(),
         ),
     )
     child_id = int(cursor.lastrowid)
-    _insert_chunks(conn, child_id, chunk_text(text))
+    _insert_chunks(conn, child_id, chunks)
     return child_id

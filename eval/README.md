@@ -6,10 +6,18 @@ real query set, or it does not, and without the numbers every future decision
 about retrieval is taste.
 
 ```sh
-muster eval                                  # keyword, k=10
-muster eval --mode hybrid --k 10             # once M7 lands
-muster eval --queries eval/queries.jsonl --results-dir eval/results
+muster corpus snapshot ~/.muster/eval-corpus.db    # freeze the corpus first
+muster eval --corpus ~/.muster/eval-corpus.db
+muster eval --corpus ~/.muster/eval-corpus.db --mode hybrid --k 10
 ```
+
+**Pin the corpus.** Scoring against the live index means the numbers move
+whenever mail arrives, which looks like progress and is not. Every run records
+a corpus fingerprint — a hash of the captured documents' `(source, source_uid,
+content_hash)` triples — in both the results JSON and the results filename.
+**Two runs are only comparable if their fingerprints match.** The fingerprint is
+stable across reparse and re-embedding, because those change derived content and
+not which mail is in the index.
 
 Each run prints a per-query line and writes a timestamped JSON file to
 `eval/results/` (gitignored) holding the full retrieved list per query, so two
@@ -26,10 +34,19 @@ runs can be diffed to see *which* queries moved rather than only the average.
 - **`q`** — what you would actually type. Do not write queries that read like
   keyword lists; the point is to measure real use.
 - **`relevant_doc_ids`** — every document that genuinely answers the query.
-  Strings match `docs.source_uid` (for Gmail, the message id; for mbox, the
-  Message-ID). Integers match `docs.id`. **Prefer strings.** Row ids change when
-  the index is rebuilt, and a query file that silently rots is worse than none.
-  An attachment's own doc has the uid `<parent-uid>#att0`.
+  **Strings only; row ids are rejected**, because they change whenever the index
+  is rebuilt and a query file that silently rots is worse than no query file.
+  Three forms are accepted:
+
+  | form | example | when |
+  |---|---|---|
+  | `source:uid` | `gmail:19fe48042d9ff694` | preferred — never ambiguous |
+  | bare uid | `19fe48042d9ff694` | fine while unique across sources |
+  | `sha256:<hash>` | `sha256:d87a5390…` | keyed on the raw bytes |
+
+  For Gmail the uid is the API message id; for mbox it is the Message-ID. An
+  attachment's own doc has the uid `<parent-uid>#att0`. A uid matching more than
+  one document is reported as ambiguous rather than guessed at.
 - **`note`** — why the query is in the set, and what it is meant to stress. This
   is the part you will thank yourself for in six months when a number moves.
 
