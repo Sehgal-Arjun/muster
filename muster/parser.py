@@ -59,6 +59,9 @@ class ParsedMessage:
     attachments: list[ParsedAttachment] = field(default_factory=list)
     headers: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # Set when a redaction rule fired. The body is already emptied by then;
+    # this records why, so the decision is auditable from meta_json.
+    redacted_by: str | None = None
 
 
 # --- header helpers -------------------------------------------------------
@@ -321,6 +324,7 @@ def parse_message(
     meta: dict[str, Any] | None = None,
     *,
     own_addresses: set[str] | None = None,
+    redactor=None,
 ) -> ParsedMessage:
     """Turn RFC822 bytes into a ParsedMessage. Never raises."""
     meta = meta or {}
@@ -351,7 +355,20 @@ def parse_message(
 
     doc_date, date_source = resolve_date(msg, meta, warnings)
 
-    if not body.strip() and not attachments:
+    # Redaction runs after parsing and before anything is indexed: the decision
+    # needs the resolved sender and subject, and must reach every downstream
+    # consumer, including reparse.
+    redacted_by = None
+    if redactor is not None:
+        hit = redactor.match(from_addrs, subject)
+        if hit is not None:
+            redacted_by = hit.rule
+            body = ""
+            subject = redactor.mask_title(subject)
+            attachments = []
+            warnings.append(f"redacted by rule {hit.rule!r}")
+
+    if not redacted_by and not body.strip() and not attachments:
         warnings.append("empty body and no attachments")
 
     return ParsedMessage(
@@ -373,6 +390,8 @@ def parse_message(
             "message_id": _header(msg, "Message-ID") or None,
             "in_reply_to": _header(msg, "In-Reply-To") or None,
             "labels": labels,
+            "redacted_by": redacted_by,
         },
         warnings=warnings,
+        redacted_by=redacted_by,
     )

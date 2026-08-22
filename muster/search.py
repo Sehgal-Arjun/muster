@@ -12,6 +12,7 @@ query and will apply to every retrieval mode added later:
 
 from __future__ import annotations
 
+import math
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -29,6 +30,14 @@ CANDIDATE_FACTOR = 6
 RRF_K = 60
 # How much deeper each arm of a hybrid query retrieves than the final cut.
 FUSION_DEPTH = 3
+# BM25 magnitude scales with log(collection size), because that is how IDF
+# scales. A floor calibrated on one index would be meaningless on another, so
+# the configured value is expressed at this collection size and scaled to the
+# index actually being searched.
+REFERENCE_CHUNKS = 1000
+# A clause matching more than this share of the index tells us nothing about
+# relevance — it is a stopword for this collection, whatever a dictionary says.
+DISCRIMINATING_SHARE = 0.10
 
 _TERM_RE = re.compile(r'"[^"]+"|\S+')
 _STRIP_RE = re.compile(r"^\W+|\W+$", re.UNICODE)
@@ -108,6 +117,7 @@ def keyword_search(
     origin: str | None = "captured",
     source: str | None = None,
     exclude_categories=DEFAULT_EXCLUDED,
+    min_score: float | None = None,
 ) -> list[Hit]:
     match = build_match_query(query)
     if not match:
@@ -117,7 +127,7 @@ def keyword_search(
         SELECT c.id                                        AS chunk_id,
                c.doc_id                                    AS doc_id,
                d.title, d.source, d.source_uid, d.doc_date, d.counterparty,
-               bm25(chunks_fts)                            AS score,
+               bm25(chunks_fts, :wtext, :wtitle)           AS score,
                snippet(chunks_fts, 0, '[', ']', ' … ', 18) AS snippet
         FROM chunks_fts
         JOIN chunks c ON c.id = chunks_fts.rowid
@@ -126,7 +136,13 @@ def keyword_search(
     """
     where, params = _filter_clause(origin, since, until, source, exclude_categories)
     sql += where
-    params |= {"match": match, "n": max(limit, 1) * CANDIDATE_FACTOR}
+    weights = _weights()
+    params |= {
+        "match": match,
+        "n": max(limit, 1) * CANDIDATE_FACTOR,
+        "wtext": weights[0],
+        "wtitle": weights[1],
+    }
     # bm25() is negative, most relevant first.
     sql += " ORDER BY score ASC LIMIT :n"
 
@@ -135,10 +151,93 @@ def keyword_search(
     except sqlite3.OperationalError as exc:
         raise ValueError(f"could not run query {query!r}: {exc}") from exc
 
-    return _collapse_to_docs(rows, limit)
+    floor = (
+        _scaled_keyword_floor(conn, _floor("keyword"), match)
+        if min_score is None
+        else min_score
+    )
+    return _collapse_to_docs(rows, limit, floor, _ratio_floor() if min_score is None else 0.0)
 
 
-def _collapse_to_docs(rows, limit: int) -> list[Hit]:
+def _weights() -> tuple[float, float]:
+    from muster.config import load_config
+
+    cfg = load_config().search
+    return cfg.text_weight, cfg.title_weight
+
+
+def _floor(mode: str) -> float:
+    from muster.config import load_config
+
+    return getattr(load_config().search, f"min_score_{mode}", 0.0)
+
+
+def _ratio_floor() -> float:
+    from muster.config import load_config
+
+    return load_config().search.min_score_ratio
+
+
+def _discriminating_clauses(conn: sqlite3.Connection, match: str, n_chunks: int) -> int:
+    """How many clauses are rare enough to carry signal.
+
+    The count is capped: we only need to know whether a clause is below the
+    threshold, so the scan stops there rather than walking the whole doclist of
+    a term like "the".
+    """
+    if not match:
+        return 1
+    cap = max(int(n_chunks * DISCRIMINATING_SHARE), 1)
+    found = 0
+    for clause in match.split(" OR "):
+        try:
+            hits = conn.execute(
+                "SELECT count(*) FROM ("
+                " SELECT 1 FROM chunks_fts WHERE chunks_fts MATCH ? LIMIT ?)",
+                (clause, cap + 1),
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            continue
+        if 0 < hits <= cap:
+            found += 1
+    return max(found, 1)
+
+
+def _scaled_keyword_floor(
+    conn: sqlite3.Connection, configured: float, match: str = ""
+) -> float:
+    """Turn the configured floor into a raw-BM25 threshold for this query.
+
+    Two normalisations, because a raw BM25 sum is comparable neither across
+    indexes nor across queries:
+
+    * **Collection size.** BM25 magnitude tracks IDF, which grows with
+      log(collection size). The same phrase scores ~2 on a 20-chunk index and
+      ~15 on a 1500-chunk one.
+    * **Discriminating query terms.** The sum runs over clauses that actually
+      matched something rare. Counting *all* clauses over-penalises a politely
+      phrased question, whose extra words are stopwords contributing 0.0;
+      counting none of them cannot separate a distinctive one-word query
+      ("Solaranlage", 13.8) from a vague two-word one ("lost jacket", 7.2),
+      because both are simply small.
+
+    So the configured number means "BM25 per discriminating clause, on an index
+    of REFERENCE_CHUNKS chunks". Measured on a 1447-chunk index, queries with a
+    real answer score 4.9-13.8 by that measure and queries without one 1.8-3.7.
+    """
+    if configured <= 0:
+        return 0.0
+    try:
+        n = conn.execute("SELECT count(*) FROM chunks").fetchone()[0] or 1
+    except sqlite3.Error:
+        n = REFERENCE_CHUNKS
+    clauses = _discriminating_clauses(conn, match, n)
+    return configured * (math.log1p(n) / math.log1p(REFERENCE_CHUNKS)) * clauses
+
+
+def _collapse_to_docs(
+    rows, limit: int, floor: float = 0.0, ratio: float = 0.0
+) -> list[Hit]:
     """One hit per document, keeping the best-scoring chunk."""
     best: dict[int, Hit] = {}
     for row in rows:
@@ -158,6 +257,14 @@ def _collapse_to_docs(rows, limit: int) -> list[Hit]:
             best[hit.doc_id] = hit
 
     ranked = sorted(best.values(), key=lambda h: (-h.score, h.doc_date))
+    if floor:
+        ranked = [hit for hit in ranked if hit.score >= floor]
+    if ratio and ranked:
+        # Scale-free companion to the absolute floor: a long tail scoring a
+        # fraction of the best hit is the shape of a query the index cannot
+        # answer, whatever the absolute numbers happen to be.
+        cutoff = ranked[0].score * ratio
+        ranked = [hit for hit in ranked if hit.score >= cutoff]
     return ranked[:limit]
 
 
@@ -204,6 +311,7 @@ def vector_search(
     origin: str | None = "captured",
     source: str | None = None,
     exclude_categories=DEFAULT_EXCLUDED,
+    min_score: float | None = None,
 ) -> list[Hit]:
     """Nearest neighbours by cosine distance, using sqlite-vec on the vectors table."""
     from muster.config import load_config
@@ -222,7 +330,7 @@ def vector_search(
         raise ValueError(f"no vectors for model {model_id!r} — run `muster embed` first")
 
     load_sqlite_vec(conn)
-    embedding = pack(encode_query(load_model(model_id, cfg.embed.device), query))
+    embedding = pack(encode_query(load_model(model_id, cfg.embed.device), query, model_id))
 
     where, params = _filter_clause(origin, since, until, source, exclude_categories)
     params |= {
@@ -265,8 +373,11 @@ def vector_search(
         for row in rows
     ]
 
+    floor = _floor("vector") if min_score is None else min_score
     best: dict[int, Hit] = {}
     for hit in hits:
+        if hit.score < floor:
+            continue
         if hit.doc_id not in best or hit.score > best[hit.doc_id].score:
             best[hit.doc_id] = hit
     return sorted(best.values(), key=lambda h: (-h.score, h.doc_date))[:limit]
@@ -312,18 +423,29 @@ def reciprocal_rank_fusion(
 
 
 def hybrid_search(
-    conn: sqlite3.Connection, query: str, *, limit: int = DEFAULT_LIMIT, **filters
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    limit: int = DEFAULT_LIMIT,
+    min_score: float | None = None,
+    **filters,
 ) -> list[Hit]:
     """BM25 and vector candidates, fused with RRF.
 
     Each arm retrieves deeper than the final cut so that a document ranked
     modestly by both — which is exactly what RRF is meant to promote — is still
     in both lists when they are fused.
+
+    The confidence floor is applied to each arm *before* fusion, never to the
+    fused score. RRF deliberately discards magnitude, compressing every result
+    into a narrow band just above 1/(k+1), so a threshold on the fused number
+    cannot distinguish a strong match from a weak one. BM25 and cosine still
+    carry that information, so that is where the question gets asked.
     """
     depth = max(limit, 1) * FUSION_DEPTH
-    keyword = keyword_search(conn, query, limit=depth, **filters)
+    keyword = keyword_search(conn, query, limit=depth, min_score=min_score, **filters)
     try:
-        vector = vector_search(conn, query, limit=depth, **filters)
+        vector = vector_search(conn, query, limit=depth, min_score=min_score, **filters)
     except ValueError as exc:
         # An unembedded index should degrade to keyword search, not fail.
         import logging
@@ -331,7 +453,11 @@ def hybrid_search(
         logging.getLogger(__name__).warning("hybrid falling back to keyword: %s", exc)
         return keyword[:limit]
 
-    return reciprocal_rank_fusion([keyword, vector], limit=limit)
+    fused = reciprocal_rank_fusion([keyword, vector], limit=limit)
+    fused_floor = _floor("hybrid")
+    if fused_floor:
+        fused = [hit for hit in fused if hit.score >= fused_floor]
+    return fused
 
 
 MODES = {"keyword": keyword_search, "vector": vector_search, "hybrid": hybrid_search}

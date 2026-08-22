@@ -39,6 +39,8 @@ class IngestResult:
     attachment_docs: int = 0
     chunks: int = 0
     warnings: list[str] | None = None
+    redacted_by: str | None = None
+    dropped: bool = False
 
     @property
     def skipped(self) -> bool:
@@ -60,17 +62,29 @@ def existing_doc_id(conn: sqlite3.Connection, source: str, source_uid: str) -> i
     return row[0] if row else None
 
 
-def _insert_chunks(conn: sqlite3.Connection, doc_id: int, texts: list[str]) -> int:
-    rows = [(doc_id, ord_, text, _text_hash(text)) for ord_, text in enumerate(texts)]
+def _insert_chunks(
+    conn: sqlite3.Connection, doc_id: int, texts: list[str], title: str | None = None
+) -> int:
+    """Insert chunks. The title is denormalised onto every row for FTS column 1."""
+    rows = [
+        (doc_id, ord_, text, _text_hash(text), title)
+        for ord_, text in enumerate(texts)
+    ]
     if rows:
         conn.executemany(
-            "INSERT INTO chunks (doc_id, ord, text, text_hash) VALUES (?, ?, ?, ?)", rows
+            "INSERT INTO chunks (doc_id, ord, text, text_hash, title)"
+            " VALUES (?, ?, ?, ?, ?)",
+            rows,
         )
     return len(rows)
 
 
 def build_chunks(parsed: ParsedMessage) -> list[str]:
     """The body's chunk texts: split, filenames attached, junk dropped."""
+    if parsed.redacted_by:
+        # Nothing searchable, deliberately — not even the subject, which is
+        # where the code usually is.
+        return []
     chunks = _annotate_with_filenames(chunk_text(parsed.body), parsed.attachments)
     chunks = filter_chunks(chunks)
     if chunks:
@@ -110,6 +124,7 @@ def ingest_message(
     raw: bytes,
     meta: dict | None = None,
     own_addresses: set[str] | None = None,
+    redactor=None,
 ) -> IngestResult:
     """Ingest one raw message. Returns without writing if it is already indexed."""
     meta = meta or {}
@@ -117,9 +132,18 @@ def ingest_message(
     if (existing := existing_doc_id(conn, source, source_uid)) is not None:
         return IngestResult(doc_id=existing, created=False)
 
-    parsed = parse_message(raw, source_uid, meta, own_addresses=own_addresses)
+    parsed = parse_message(
+        raw, source_uid, meta, own_addresses=own_addresses, redactor=redactor
+    )
     for warning in parsed.warnings:
         log.warning("%s/%s: %s", source, source_uid, warning)
+
+    if parsed.redacted_by and redactor is not None and redactor.mode == "drop":
+        # Nothing is written, not even the blob: drop mode means the archive
+        # never holds the credential at all.
+        return IngestResult(
+            doc_id=None, created=False, redacted_by=parsed.redacted_by, dropped=True
+        )
 
     # The original goes to the blob store before anything references it.
     blob_path, content_hash = store.put_blob(raw)
@@ -142,7 +166,7 @@ def ingest_message(
             parsed=parsed,
             meta_extra={"body_mime": parsed.mime, "warnings": parsed.warnings, **meta},
         )
-        n_chunks = _insert_chunks(conn, doc_id, body_chunks)
+        n_chunks = _insert_chunks(conn, doc_id, body_chunks, parsed.title)
         attachment_docs = _ingest_attachments(conn, store, doc_id, parsed, source)
 
     return IngestResult(
@@ -151,6 +175,7 @@ def ingest_message(
         attachment_docs=attachment_docs,
         chunks=n_chunks,
         warnings=parsed.warnings,
+        redacted_by=parsed.redacted_by,
     )
 
 
@@ -304,5 +329,5 @@ def _insert_attachment_doc(
         ),
     )
     child_id = int(cursor.lastrowid)
-    _insert_chunks(conn, child_id, chunks)
+    _insert_chunks(conn, child_id, chunks, attachment.filename or parent.title)
     return child_id

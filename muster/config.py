@@ -33,6 +33,66 @@ class EmbedConfig:
     model_id: str = DEFAULT_EMBED_MODEL
     batch_size: int = 64
     device: str | None = None  # None => autodetect (mps > cuda > cpu)
+    # Prepend the document title to its first chunk before encoding. Affects
+    # the vector arm only — the stored chunk text, and therefore BM25, is
+    # untouched, so the two can be measured independently.
+    prepend_title: bool = False
+
+
+@dataclass(frozen=True)
+class SearchConfig:
+    """Ranking knobs.
+
+    The score floors are per-mode because the scales are unrelated: BM25 is
+    unbounded, cosine similarity sits in [-1, 1], and RRF compresses everything
+    into a narrow band just above 1/(k+1). A single number could not mean the
+    same thing in all three.
+    """
+
+    title_weight: float = 3.0
+    text_weight: float = 1.0
+    # Applied to each arm's native score. Below this, a result is noise, and
+    # ten confident-looking wrong answers are worse than none.
+    # BM25 per discriminating clause at a 1000-chunk index, scaled to the real
+    # index and query at search time. Measured on a 1447-chunk index: queries
+    # with a real answer score 4.9-13.8, queries without one 1.8-3.7.
+    min_score_keyword: float = 4.0
+    min_score_vector: float = 0.60
+    min_score_hybrid: float = 0.0  # arms are already floored before fusion
+    # Drop results below this fraction of the best hit. Scale-free, and what
+    # removes the flat tail that RRF in particular produces.
+    min_score_ratio: float = 0.25
+
+
+@dataclass(frozen=True)
+class RedactionRule:
+    """Both patterns must match. Either alone is far too broad."""
+
+    name: str
+    sender: str
+    subject: str
+
+
+# One-time codes and magic links: the highest-risk content in a mail archive
+# and the least useful to search. Overridable in full from config.
+DEFAULT_REDACTION_RULES = (
+    RedactionRule(
+        name="one-time-credentials",
+        sender=r"(?i)(?:^|[.<@_-])(?:no-?reply|do-?not-?reply|verify|accounts?|security)\b",
+        subject=(
+            r"(?i)\b(?:code|verification|verify|sign[- ]?in|log[- ]?in|login|"
+            r"secure link|magic link|one[- ]?time|otp|passcode|password|"
+            r"authenticate|confirm your (?:email|account)|2fa)\b"
+        ),
+    ),
+)
+
+
+@dataclass(frozen=True)
+class RedactionConfig:
+    enabled: bool = True
+    mode: str = "redact"  # 'redact' keeps the doc and blob; 'drop' indexes nothing
+    rules: tuple[RedactionRule, ...] = DEFAULT_REDACTION_RULES
 
 
 @dataclass(frozen=True)
@@ -42,6 +102,8 @@ class Config:
     blob_dir: Path
     gmail: GmailConfig
     embed: EmbedConfig = field(default_factory=EmbedConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
+    redaction: RedactionConfig = field(default_factory=RedactionConfig)
     # Your own addresses, so `counterparty` can name the other party rather
     # than you. Empty is fine: outbound mail is then detected by label alone.
     own_addresses: frozenset[str] = frozenset()
@@ -73,6 +135,8 @@ def load_config(home: Path | None = None) -> Config:
     storage = raw.get("storage", {})
     gmail = raw.get("gmail", {})
     embed = raw.get("embed", {})
+    search = raw.get("search", {})
+    redaction = raw.get("redaction", {})
 
     return Config(
         home=home,
@@ -87,8 +151,39 @@ def load_config(home: Path | None = None) -> Config:
             model_id=embed.get("model_id", DEFAULT_EMBED_MODEL),
             batch_size=int(embed.get("batch_size", 64)),
             device=embed.get("device"),
+            prepend_title=bool(embed.get("prepend_title", False)),
         ),
+        search=SearchConfig(
+            title_weight=float(search.get("title_weight", 3.0)),
+            text_weight=float(search.get("text_weight", 1.0)),
+            min_score_keyword=float(search.get("min_score_keyword", 4.0)),
+            min_score_vector=float(search.get("min_score_vector", 0.60)),
+            min_score_hybrid=float(search.get("min_score_hybrid", 0.0)),
+            min_score_ratio=float(search.get("min_score_ratio", 0.25)),
+        ),
+        redaction=_redaction_config(redaction),
         own_addresses=frozenset(
             a.lower() for a in raw.get("identity", {}).get("addresses", [])
         ),
+    )
+
+
+def _redaction_config(raw: dict) -> RedactionConfig:
+    rules = raw.get("rules")
+    if rules is None:
+        parsed = DEFAULT_REDACTION_RULES
+    else:
+        parsed = tuple(
+            RedactionRule(
+                name=str(rule.get("name", f"rule-{i}")),
+                sender=str(rule.get("sender", "")),
+                subject=str(rule.get("subject", "")),
+            )
+            for i, rule in enumerate(rules)
+        )
+    mode = str(raw.get("mode", "redact")).lower()
+    if mode not in ("redact", "drop"):
+        raise ValueError(f"redaction.mode must be 'redact' or 'drop', not {mode!r}")
+    return RedactionConfig(
+        enabled=bool(raw.get("enabled", True)), mode=mode, rules=parsed
     )

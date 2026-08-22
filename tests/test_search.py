@@ -51,7 +51,7 @@ def test_results_are_ranked_best_first(indexed) -> None:
 
 
 def test_snippet_marks_the_match(indexed) -> None:
-    (hit,) = [h for h in keyword_search(indexed, "quetzal") if "quetzal" in h.snippet.lower()]
+    (hit,) = [h for h in keyword_search(indexed, "quetzal", min_score=0.0) if "quetzal" in h.snippet.lower()]
     assert "[" in hit.snippet and "]" in hit.snippet
 
 
@@ -109,8 +109,8 @@ def test_until_filter_excludes_newer(indexed) -> None:
 
 
 def test_source_filter(indexed) -> None:
-    assert keyword_search(indexed, "warehouse", source="file")
-    assert not keyword_search(indexed, "warehouse", source="gmail")
+    assert keyword_search(indexed, "warehouse", source="file", min_score=0.0)
+    assert not keyword_search(indexed, "warehouse", source="gmail", min_score=0.0)
 
 
 # --- attachments are searchable in their own right ------------------------

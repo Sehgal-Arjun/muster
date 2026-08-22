@@ -161,24 +161,33 @@ def test_a_second_model_inserts_alongside_the_first(chunked) -> None:
 # --- query encoding -------------------------------------------------------
 
 
-def test_bge_query_prefix_is_applied_for_bge_models() -> None:
-    class Bgeish(FakeModel):
-        def __init__(self):
-            super().__init__()
-            self._name = "BAAI/bge-small-en-v1.5"
-
-        def __str__(self):
-            return self._name
-
-    model = Bgeish()
-    model.model_card_data = type("MC", (), {"base_model": "BAAI/bge-small-en-v1.5"})()
-    encode_query(model, "invoice")
-    assert model.calls[0][0].startswith(BGE_QUERY_PREFIX)
-
-
-def test_non_bge_model_gets_the_bare_query() -> None:
+def test_bge_query_prefix_is_applied_for_bge_v15() -> None:
     model = FakeModel()
-    encode_query(model, "invoice")
+    encode_query(model, "invoice", "BAAI/bge-small-en-v1.5")
+    assert model.calls[0][0] == BGE_QUERY_PREFIX + "invoice"
+
+
+def test_bge_m3_is_instruction_free() -> None:
+    """m3 is not trained with the v1.5 prefix; applying it would hurt recall."""
+    model = FakeModel()
+    encode_query(model, "invoice", "BAAI/bge-m3")
+    assert model.calls[0][0] == "invoice"
+
+
+def test_e5_uses_its_own_asymmetric_prefixes() -> None:
+    from muster.embed import encode_documents
+
+    model = FakeModel()
+    encode_query(model, "invoice", "intfloat/multilingual-e5-base")
+    assert model.calls[0][0] == "query: invoice"
+
+    encode_documents(model, ["a body"], model_id="intfloat/multilingual-e5-base")
+    assert model.calls[1][0] == "passage: a body"
+
+
+def test_unknown_model_gets_the_bare_query() -> None:
+    model = FakeModel()
+    encode_query(model, "invoice", "someone/unknown-model")
     assert model.calls[0][0] == "invoice"
 
 

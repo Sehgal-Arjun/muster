@@ -23,9 +23,34 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
-# BGE models are trained with an asymmetric prefix: queries get this, documents
-# get nothing. Omitting it measurably degrades retrieval, so it is not optional.
+# Retrieval models are trained with asymmetric prefixes, and they differ per
+# family. Using the wrong one — or none — measurably degrades recall, so this is
+# a lookup rather than a guess based on the model name.
 BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+MODEL_PREFIXES: dict[str, tuple[str, str]] = {
+    # model_id: (query prefix, document prefix)
+    "BAAI/bge-small-en-v1.5": (BGE_QUERY_PREFIX, ""),
+    "BAAI/bge-base-en-v1.5": (BGE_QUERY_PREFIX, ""),
+    "BAAI/bge-large-en-v1.5": (BGE_QUERY_PREFIX, ""),
+    # bge-m3 is instruction-free by design; adding the v1.5 prefix hurts it.
+    "BAAI/bge-m3": ("", ""),
+    "intfloat/multilingual-e5-base": ("query: ", "passage: "),
+    "intfloat/multilingual-e5-small": ("query: ", "passage: "),
+    "intfloat/multilingual-e5-large": ("query: ", "passage: "),
+}
+
+
+def prefixes_for(model_id: str) -> tuple[str, str]:
+    if model_id in MODEL_PREFIXES:
+        return MODEL_PREFIXES[model_id]
+    lowered = model_id.lower()
+    if "e5" in lowered:
+        return "query: ", "passage: "
+    if "bge" in lowered and "m3" not in lowered:
+        return BGE_QUERY_PREFIX, ""
+    log.debug("no prefix convention known for %s; using none", model_id)
+    return "", ""
 
 DEFAULT_BATCH = 64
 _model_cache: dict[tuple[str, str | None], object] = {}
@@ -66,7 +91,12 @@ def load_model(model_id: str, device: str | None = None):
     return _model_cache[key]
 
 
-def encode_documents(model, texts: list[str], batch_size: int = DEFAULT_BATCH):
+def encode_documents(
+    model, texts: list[str], batch_size: int = DEFAULT_BATCH, model_id: str = ""
+):
+    _query_prefix, doc_prefix = prefixes_for(model_id)
+    if doc_prefix:
+        texts = [doc_prefix + text for text in texts]
     return model.encode(
         texts,
         batch_size=batch_size,
@@ -76,23 +106,14 @@ def encode_documents(model, texts: list[str], batch_size: int = DEFAULT_BATCH):
     )
 
 
-def encode_query(model, query: str):
+def encode_query(model, query: str, model_id: str = ""):
+    query_prefix, _doc_prefix = prefixes_for(model_id)
     return model.encode(
-        BGE_QUERY_PREFIX + query if _is_bge(model) else query,
+        query_prefix + query,
         normalize_embeddings=True,
         convert_to_numpy=True,
         show_progress_bar=False,
     )
-
-
-def _is_bge(model) -> bool:
-    name = ""
-    for attribute in ("model_card_data", "_model_config"):
-        holder = getattr(model, attribute, None)
-        name = str(getattr(holder, "base_model", "") or holder or "")
-        if name:
-            break
-    return "bge" in (name or str(getattr(model, "_first_module", lambda: "")())).lower()
 
 
 # --- work discovery -------------------------------------------------------
@@ -103,6 +124,19 @@ class PendingGroup:
     text_hash: str
     text: str
     chunk_ids: list[int]
+    title: str = ""
+    first_ord: int = 0
+
+    def encode_input(self, prepend_title: bool) -> str:
+        """What actually gets embedded.
+
+        The title goes only on the document's first chunk: repeating it on every
+        chunk of a long document would pull all of them toward the subject and
+        blur what distinguishes them.
+        """
+        if prepend_title and self.title and self.first_ord == 0:
+            return f"{self.title}\n\n{self.text}"
+        return self.text
 
 
 def count_pending(conn: sqlite3.Connection, model_id: str) -> int:
@@ -118,18 +152,29 @@ def count_pending(conn: sqlite3.Connection, model_id: str) -> int:
 
 
 def pending_groups(
-    conn: sqlite3.Connection, model_id: str, *, limit: int | None = None
+    conn: sqlite3.Connection,
+    model_id: str,
+    *,
+    limit: int | None = None,
+    prepend_title: bool = False,
 ) -> Iterator[PendingGroup]:
     """Chunks with no vector for this model, grouped by identical text."""
-    sql = """
+    # When the title is prepended the encoded string differs per title, so the
+    # dedup key has to include it or two chunks with identical bodies under
+    # different subjects would wrongly share one vector.
+    group_key = "c.text_hash, coalesce(c.title, '')" if prepend_title else "c.text_hash"
+    title_select = "min(coalesce(c.title, ''))" if prepend_title else "''"
+    sql = f"""
         SELECT c.text_hash                     AS text_hash,
                min(c.text)                     AS text,
+               {title_select}                  AS title,
+               min(c.ord)                      AS first_ord,
                group_concat(c.id)              AS chunk_ids
         FROM chunks c
         WHERE NOT EXISTS (
             SELECT 1 FROM vectors v WHERE v.chunk_id = c.id AND v.model_id = :model
         )
-        GROUP BY c.text_hash
+        GROUP BY {group_key}
         ORDER BY min(c.id)
     """
     params: dict[str, object] = {"model": model_id}
@@ -141,6 +186,8 @@ def pending_groups(
         yield PendingGroup(
             text_hash=row["text_hash"],
             text=row["text"],
+            title=row["title"] or "",
+            first_ord=int(row["first_ord"]),
             chunk_ids=[int(i) for i in str(row["chunk_ids"]).split(",")],
         )
 
@@ -164,12 +211,13 @@ def embed_pending(
     limit: int | None = None,
     progress=None,
     model=None,
+    prepend_title: bool = False,
 ) -> EmbedReport:
     """Embed every chunk lacking a vector for ``model_id``. Safe to interrupt."""
     device = resolve_device(device)
     report = EmbedReport(model_id=model_id, device=device)
 
-    groups = list(pending_groups(conn, model_id, limit=limit))
+    groups = list(pending_groups(conn, model_id, limit=limit, prepend_title=prepend_title))
     if not groups:
         return report
 
@@ -177,7 +225,12 @@ def embed_pending(
 
     for start in range(0, len(groups), batch_size):
         batch = groups[start : start + batch_size]
-        vectors = encode_documents(model, [g.text for g in batch], batch_size=batch_size)
+        vectors = encode_documents(
+            model,
+            [g.encode_input(prepend_title) for g in batch],
+            batch_size=batch_size,
+            model_id=model_id,
+        )
 
         rows = [
             (chunk_id, model_id, pack(vector))

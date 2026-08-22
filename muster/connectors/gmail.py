@@ -113,10 +113,19 @@ class GmailConnector:
             self._service = build("gmail", "v1", credentials=creds, cache_discovery=False)
         return self._service
 
-    def list_ids(self, query: str, limit: int | None = None) -> Iterator[str]:
+    def list_ids(
+        self, query: str, limit: int | None = None, on_page=None
+    ) -> Iterator[str]:
+        """Page through message ids.
+
+        ``on_page`` is called after each page with the running total. Listing a
+        large mailbox takes minutes and produces nothing until the first fetch,
+        which is indistinguishable from a hang.
+        """
         messages = self.service.users().messages()
         page_token = None
         seen = 0
+        pages = 0
         while True:
             page_size = PAGE_SIZE if limit is None else min(PAGE_SIZE, limit - seen)
             response = _retrying(
@@ -125,7 +134,11 @@ class GmailConnector:
                 ).execute(),
                 what="messages.list",
             )
-            for item in response.get("messages", []):
+            batch = response.get("messages", [])
+            pages += 1
+            if on_page:
+                on_page(seen + len(batch), pages, bool(response.get("nextPageToken")))
+            for item in batch:
                 yield item["id"]
                 self.listed += 1
                 seen += 1
@@ -135,13 +148,15 @@ class GmailConnector:
             if not page_token:
                 return
 
-    def fetch(self, query: str | None = None, *, limit: int | None = None) -> Iterator[RawMessage]:
+    def fetch(
+        self, query: str | None = None, *, limit: int | None = None, on_page=None
+    ) -> Iterator[RawMessage]:
         query = query or DEFAULT_QUERY
         self.listed = 0
         self.dropped = []
         messages = self.service.users().messages()
 
-        for message_id in self.list_ids(query, limit):
+        for message_id in self.list_ids(query, limit, on_page=on_page):
             try:
                 payload = _retrying(
                     lambda mid=message_id: messages.get(

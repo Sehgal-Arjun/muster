@@ -120,13 +120,13 @@ def mixed(conn: sqlite3.Connection, cfg) -> sqlite3.Connection:
 
 
 def test_promotions_are_hidden_by_default(mixed) -> None:
-    uids = {h.source_uid for h in keyword_search(mixed, "warehouse")}
+    uids = {h.source_uid for h in keyword_search(mixed, "warehouse", min_score=0.0)}
     assert "r1" in uids
     assert "p1" not in uids
 
 
 def test_promotions_are_reachable_when_asked_for(mixed) -> None:
-    uids = {h.source_uid for h in keyword_search(mixed, "warehouse", exclude_categories=frozenset())}
+    uids = {h.source_uid for h in keyword_search(mixed, "warehouse", exclude_categories=frozenset(), min_score=0.0)}
     assert {"p1", "r1"} <= uids
 
 
@@ -134,7 +134,7 @@ def test_uncategorised_docs_always_pass_the_filter(conn, cfg) -> None:
     """NULL means 'not categorised' — every mbox doc and all personal mail."""
     store = BlobStore(cfg.blob_dir)
     ingest_message(conn, store, source="file", source_uid="f1", raw=REAL)
-    assert keyword_search(conn, "warehouse")
+    assert keyword_search(conn, "warehouse", min_score=0.0)
 
 
 def test_social_is_hidden_too(conn, cfg) -> None:
@@ -143,7 +143,7 @@ def test_social_is_hidden_too(conn, cfg) -> None:
         conn, store, source="gmail", source_uid="s1", raw=PROMO,
         meta={"labels": ["CATEGORY_SOCIAL"]},
     )
-    assert keyword_search(conn, "warehouse") == []
+    assert keyword_search(conn, "warehouse", min_score=0.0) == []
 
 
 def test_sync_can_drop_excluded_categories_before_ingest(conn, cfg) -> None:

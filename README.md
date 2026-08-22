@@ -27,6 +27,11 @@ make install               # venv, deps, and the talon workaround below
 .venv/bin/muster status
 ```
 
+`muster status` breaks documents down by kind and by month, reporting distinct
+content hashes alongside the count so a month with unusual volume can be told
+apart from duplication, and counts documents with no chunks — which match no
+query, and are how a parser regression hides.
+
 Use `make install`, not a bare `pip install -e .`. talon's published metadata
 hard-requires `cchardet`, whose C extension cannot build on Python 3.11+, so
 talon has to go in with `--no-deps` alongside `faust-cchardet`. `pyproject.toml`
@@ -81,6 +86,46 @@ HTML is converted with lxml, not talon: talon refuses any document over 419
 tags — two thirds of real mail — and returned `None`, so almost every
 promotional message fell through to a regex fallback that could not see
 conditional comments. Office metadata leaked in as bare text.
+
+## Credentials are kept out of the index
+
+A mail archive accumulates login codes, password resets and magic links: the
+highest-risk content it holds and the least useful to search. A rule fires only
+when **both** the sender and the subject pattern match — plenty of real mail
+comes from no-reply addresses, and "password" appears in ordinary
+correspondence.
+
+```toml
+[redaction]
+enabled = true
+mode = "redact"        # or "drop"
+
+[[redaction.rules]]
+name = "one-time-credentials"
+sender = "(?i)(?:^|[.<@_-])(?:no-?reply|do-?not-?reply|verify|accounts?|security)\\b"
+subject = "(?i)\\b(?:code|verification|sign[- ]?in|login|secure link|one[- ]?time|otp|password)\\b"
+```
+
+- **`redact`** keeps the document and its original blob but indexes nothing:
+  no chunks at all — not even the title fallback, since the code is usually
+  *in* the subject — and digit runs in the stored title are masked. **The raw
+  original still contains the secret under `blobs/`.**
+- **`drop`** stores nothing: no document row, no blob.
+
+Providing `[[redaction.rules]]` replaces the built-in list rather than adding
+to it.
+
+## Removing documents
+
+```sh
+muster purge --source file --dry-run     # fixtures that leaked into the index
+muster purge --category promotions
+muster purge --uid-prefix "gmail:19fe"
+```
+
+Blobs are kept: they are content-addressed and immutable, some are shared with
+documents that are staying, and re-indexing is a `muster sync` away precisely
+because the originals survive. A purge without a selector is refused.
 
 ## Gmail categories
 
@@ -139,9 +184,10 @@ muster search "warehouse lease renewal" --limit 10 --since 2026-01-01
 muster search "..." --mode keyword | vector | hybrid
 ```
 
-- **keyword** — BM25 over FTS5. Terms are OR-ed, and a punctuated term
-  contributes both its phrase and its parts, so `Rechnung_2026-0042.pdf` finds
-  the covering email *and* the invoice.
+- **keyword** — BM25 over FTS5, with the subject indexed as its own column at
+  weight 3.0. Terms are OR-ed, and a punctuated term contributes both its
+  phrase and its parts, so `Rechnung_2026-0042.pdf` finds the covering email
+  *and* the invoice.
 - **vector** — `bge-small-en-v1.5` via sqlite-vec cosine distance. Needs
   `muster embed` first.
 - **hybrid** — both arms fused with Reciprocal Rank Fusion at k=60. Falls back
@@ -150,10 +196,39 @@ muster search "..." --mode keyword | vector | hybrid
 All three stay available so they remain comparable under `muster eval`; a mode
 that cannot be measured against the others is a mode nobody can reason about.
 
+### Confidence floor
+
+Ten confident-looking wrong answers are worse than none, so results that only
+clear the noise level are suppressed and search says `no confident matches`.
+
+The floor is applied to each arm's **native** score, never to the fused one:
+RRF discards magnitude by design, compressing everything into a narrow band
+just above 1/(k+1), so a threshold there cannot tell a strong match from a weak
+one. BM25 and cosine still can.
+
+`min_score_keyword` is expressed as *BM25 per discriminating clause at a
+1000-chunk index* and rescaled at search time, because a raw BM25 number is
+comparable neither across indexes (magnitude tracks log collection size) nor
+across queries (a one-word query can only accumulate one term's worth). A
+clause matching more than 10% of the index is treated as a stopword for this
+collection and does not count. Measured on a 1447-chunk index:
+
+| | per discriminating clause |
+|---|---|
+| queries with a real answer | 4.9 – 13.8 |
+| queries with none | 1.8 – 3.7 |
+
+`--min-score N` overrides it for one search; `--no-min-score` shows everything.
+
 ```sh
 make install-embed        # adds sentence-transformers (pulls torch)
 muster embed              # resumable; skips chunks that already have a vector
 ```
+
+Query and passage prefixes are per model, from a lookup rather than a guess:
+bge-v1.5 takes an instruction prefix on queries, bge-m3 takes none, and the e5
+family needs `query: ` / `passage: `. Using the wrong one measurably costs
+recall.
 
 `muster embed` is safe to interrupt — each batch commits — and identical chunk
 text is encoded once and written for every chunk that shares its `text_hash`.
@@ -199,6 +274,13 @@ query = "newer_than:7d"
 model_id = "BAAI/bge-small-en-v1.5"
 batch_size = 64
 # device = "mps"           # default: autodetect
+
+[search]
+title_weight = 3.0            # subject column in bm25(chunks_fts, text, title)
+text_weight = 1.0
+min_score_keyword = 4.0       # per discriminating clause at 1000 chunks
+min_score_vector = 0.60       # cosine similarity
+min_score_ratio = 0.25        # drop results below this fraction of the best hit
 
 [identity]
 addresses = ["you@example.com"]   # so `counterparty` names the other party

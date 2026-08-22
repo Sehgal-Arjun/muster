@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from pathlib import Path
 from typing import Annotated
@@ -32,10 +33,9 @@ app.add_typer(corpus_app)
 def _root(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Log at DEBUG.")] = False,
 ) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(levelname)s %(name)s: %(message)s",
-    )
+    from muster.logging_setup import configure
+
+    configure(verbose)
 
 
 @app.command()
@@ -61,7 +61,11 @@ def init() -> None:
 
 
 @app.command()
-def status() -> None:
+def status(
+    months_shown: Annotated[
+        int, typer.Option("--months", help="How many months of history to break down.")
+    ] = 18,
+) -> None:
     """Show where the data lives and which migrations are applied."""
     cfg = load_config()
     if not cfg.db_path.exists():
@@ -85,6 +89,29 @@ def status() -> None:
         categories = conn.execute(
             "SELECT COALESCE(category, '-'), count(*) FROM docs GROUP BY 1 ORDER BY 2 DESC"
         ).fetchall()
+        kinds = conn.execute(
+            """
+            SELECT CASE
+                     WHEN mime = 'message/rfc822' THEN 'message'
+                     WHEN source_uid LIKE '%#att%' THEN 'attachment'
+                     ELSE COALESCE(mime, 'other')
+                   END AS kind,
+                   count(*)
+            FROM docs WHERE origin = 'captured' GROUP BY 1 ORDER BY 2 DESC
+            """
+        ).fetchall()
+        months = conn.execute(
+            """
+            SELECT substr(doc_date, 1, 7) AS month,
+                   count(*)                              AS docs,
+                   count(DISTINCT content_hash)          AS distinct_bytes,
+                   count(DISTINCT COALESCE(thread_uid, source_uid)) AS threads
+            FROM docs
+            WHERE origin = 'captured' AND mime = 'message/rfc822'
+            GROUP BY 1 ORDER BY 1 DESC LIMIT :n
+            """,
+            {"n": months_shown},
+        ).fetchall()
     finally:
         conn.close()
 
@@ -99,6 +126,21 @@ def status() -> None:
     if categories:
         summary = "  ".join(f"{name} {count}" for name, count in categories)
         typer.echo(f"{'categories':<13}{summary}")
+
+    typer.echo("\nby kind")
+    for kind, count in kinds:
+        typer.echo(f"  {kind:<26}{count:>7}")
+
+    if months:
+        # distinct_bytes below docs is duplication: the same message stored
+        # twice under different uids. Threads well below docs is normal — a
+        # thread holds several messages.
+        typer.echo(f"\nby month (messages only, newest {len(months)})")
+        typer.echo(f"  {'month':<10}{'docs':>7}{'distinct':>10}{'threads':>9}   dup")
+        for month, docs_n, distinct_n, threads_n in months:
+            dup = docs_n - distinct_n
+            flag = typer.style(f"{dup:>5}", fg="yellow") if dup else f"{dup:>5}"
+            typer.echo(f"  {month or '?':<10}{docs_n:>7}{distinct_n:>10}{threads_n:>9}{flag}")
 
 
 def _require_db(cfg):
@@ -123,13 +165,24 @@ def _drain(
     """
     from muster.categories import is_excluded
     from muster.ingest import ingest_message
+    from muster.redaction import Redactor
 
     conn = db.connect(cfg.db_path)
     store = BlobStore(cfg.blob_dir)
     seen = created = skipped = failed = attachment_docs = chunks = filtered = 0
+    redacted = dropped_by_rule = 0
+    redactor = Redactor(cfg.redaction)
+
+    def on_page(total: int, pages: int, more: bool) -> None:
+        tail = "" if more else " (complete)"
+        typer.echo(f"\rlisting: {total} message ids over {pages} pages{tail}", nl=not more)
+
+    fetch_kwargs = {"limit": limit}
+    if "on_page" in inspect.signature(connector.fetch).parameters:
+        fetch_kwargs["on_page"] = on_page
 
     try:
-        for message in connector.fetch(query, limit=limit):
+        for message in connector.fetch(query, **fetch_kwargs):
             seen += 1
             if exclude_categories and is_excluded(
                 message.meta.get("labels"), exclude_categories
@@ -145,6 +198,7 @@ def _drain(
                     raw=message.raw,
                     meta=message.meta,
                     own_addresses=set(cfg.own_addresses),
+                    redactor=redactor,
                 )
             except Exception as exc:
                 failed += 1
@@ -153,6 +207,11 @@ def _drain(
                 )
                 continue
 
+            if result.redacted_by:
+                redacted += 1
+            if result.dropped:
+                dropped_by_rule += 1
+                continue
             if result.created:
                 created += 1
                 attachment_docs += result.attachment_docs
@@ -174,12 +233,15 @@ def _drain(
         f"\n{listed} listed by source"
         f"\n  {len(dropped)} unfetchable (dropped before parsing)"
         f"\n  {filtered} filtered by category"
+        f"\n  {dropped_by_rule} dropped by a redaction rule"
         f"\n  {created} newly indexed"
         f"\n  {skipped} already indexed"
         f"\n  {failed} failed to parse"
         f"\n{chunks} chunks, {attachment_docs} attachment docs"
     )
-    if listed != len(dropped) + filtered + created + skipped + failed:
+    if redacted:
+        typer.echo(f"  {redacted} redacted (credentials kept out of the index)")
+    if listed != len(dropped) + filtered + dropped_by_rule + created + skipped + failed:
         typer.echo(
             typer.style("  warning: counters do not reconcile", fg="yellow"), err=True
         )
@@ -335,6 +397,13 @@ def search(
     all_categories: Annotated[
         bool, typer.Option("--all-categories", help="Do not hide any category.")
     ] = False,
+    min_score: Annotated[
+        float | None,
+        typer.Option("--min-score", help="Confidence floor. Overrides config."),
+    ] = None,
+    no_min_score: Annotated[
+        bool, typer.Option("--no-min-score", help="Show everything, however weak.")
+    ] = False,
 ) -> None:
     """Search the index."""
     from muster.categories import DEFAULT_EXCLUDED, parse_selection
@@ -366,6 +435,7 @@ def search(
             source=source,
             origin=None if include_derived else "captured",
             exclude_categories=excluded,
+            min_score=0.0 if no_min_score else min_score,
         )
     except ValueError as exc:
         typer.echo(str(exc), err=True)
@@ -374,7 +444,12 @@ def search(
         conn.close()
 
     if not hits:
-        typer.echo("no results")
+        # A weak match presented like a strong one is worse than nothing: it
+        # invites the reader to believe the archive was searched and came back
+        # with this.
+        typer.echo("no confident matches")
+        if not no_min_score:
+            typer.echo("  (--no-min-score to see weak matches anyway)", err=True)
         return
 
     for rank, hit in enumerate(hits, start=1):
@@ -385,6 +460,69 @@ def search(
             f"  score {hit.score:.3f}  doc {hit.doc_id}"
             f"\n    {hit.snippet}"
         )
+
+
+@app.command()
+def purge(
+    source: Annotated[
+        str | None, typer.Option("--source", help="Purge everything from this source.")
+    ] = None,
+    uid_prefix: Annotated[
+        str | None, typer.Option("--uid-prefix", help="Purge uids starting with this.")
+    ] = None,
+    category: Annotated[
+        str | None, typer.Option("--category", help="Purge one Gmail category.")
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would go, change nothing.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation.")] = False,
+) -> None:
+    """Remove documents from the index. Blobs are kept; originals are immutable."""
+    from muster.purge import plan as purge_plan
+    from muster.purge import purge as run_purge
+
+    cfg = load_config()
+    _require_db(cfg)
+
+    conn = db.connect(cfg.db_path)
+    try:
+        try:
+            preview = purge_plan(
+                conn, source=source, uid_prefix=uid_prefix, category=category
+            )
+        except ValueError as exc:
+            typer.echo(f"{exc}. Pass --source, --uid-prefix or --category.", err=True)
+            raise typer.Exit(1) from exc
+
+        if preview.empty:
+            typer.echo("nothing matches")
+            return
+
+        typer.echo(
+            f"would remove {preview.docs} docs, {preview.chunks} chunks,"
+            f" {preview.vectors} vectors, {preview.attachments} attachment rows"
+        )
+        for title in preview.titles:
+            typer.echo(f"  {title[:76]}")
+        if preview.docs > len(preview.titles):
+            typer.echo(f"  … and {preview.docs - len(preview.titles)} more")
+
+        if dry_run:
+            typer.echo("\ndry run — nothing changed")
+            return
+        if not yes and not typer.confirm("\nproceed?"):
+            typer.echo("cancelled")
+            return
+
+        done = run_purge(conn, source=source, uid_prefix=uid_prefix, category=category)
+    finally:
+        conn.close()
+
+    typer.echo(
+        f"removed {done.docs} docs and {done.chunks} chunks."
+        "\nBlobs are untouched — re-run sync to index them again."
+    )
 
 
 @app.command()
@@ -404,6 +542,7 @@ def reparse(
     Ingest is idempotent on source_uid, so parser fixes never reach mail that is
     already indexed. This is how they get there.
     """
+    from muster.redaction import Redactor
     from muster.reparse import reparse as run_reparse
 
     cfg = load_config()
@@ -424,6 +563,7 @@ def reparse(
             limit=limit,
             own_addresses=set(cfg.own_addresses),
             force=force,
+            redactor=Redactor(cfg.redaction),
             progress=show,
         )
     finally:

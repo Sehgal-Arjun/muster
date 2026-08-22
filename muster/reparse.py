@@ -170,6 +170,7 @@ def reparse_doc(
     *,
     own_addresses: set[str] | None = None,
     force: bool = False,
+    redactor=None,
 ) -> tuple[bool, int, int, int]:
     """Rebuild one document. Returns (changed, chunks_before, chunks_after, vectors_kept)."""
     doc_id = int(row["id"])
@@ -190,7 +191,9 @@ def reparse_doc(
         "internal_date": stored_meta.get("internal_date"),
     }
 
-    parsed = parse_message(raw, row["source_uid"], meta, own_addresses=own_addresses)
+    parsed = parse_message(
+        raw, row["source_uid"], meta, own_addresses=own_addresses, redactor=redactor
+    )
     new_chunks = build_chunks(parsed)
     plan = attachment_plan(parsed)
 
@@ -258,7 +261,7 @@ def reparse_doc(
                 "id": doc_id,
             },
         )
-        _insert_chunks(conn, doc_id, new_chunks)
+        _insert_chunks(conn, doc_id, new_chunks, parsed.title)
         _rebuild_attachments(conn, store, doc_id, parsed, plan, row["source"])
 
         rebuilt = [doc_id, *_child_doc_ids(conn, doc_id)]
@@ -310,6 +313,7 @@ def reparse(
     limit: int | None = None,
     own_addresses: set[str] | None = None,
     force: bool = False,
+    redactor=None,
     progress=None,
 ) -> ReparseReport:
     """Rebuild chunks, attachments and categories from stored raw bytes."""
@@ -319,7 +323,8 @@ def reparse(
         report.scanned += 1
         try:
             changed, before, after, kept = reparse_doc(
-                conn, store, row, own_addresses=own_addresses, force=force
+                conn, store, row, own_addresses=own_addresses, force=force,
+                redactor=redactor,
             )
         except BlobNotFound:
             report.failed += 1

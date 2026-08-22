@@ -70,14 +70,14 @@ def uids(hits) -> set[str]:
 
 
 def test_filename_query_reaches_both_adjacent_and_separated_tokens(indexed) -> None:
-    found = uids(keyword_search(indexed, "Rechnung_2026-0042.pdf", limit=10))
+    found = uids(keyword_search(indexed, "Rechnung_2026-0042.pdf", limit=10, min_score=0.0))
     assert "covering@example.com" in found, "the message carrying the file"
     assert "invoice@example.com" in found, "the invoice itself — the half that regressed"
 
 
 def test_the_exact_filename_still_ranks_first(indexed) -> None:
     """Adding the parts must not cost the exact match its top position."""
-    hits = keyword_search(indexed, "Rechnung_2026-0042.pdf", limit=10)
+    hits = keyword_search(indexed, "Rechnung_2026-0042.pdf", limit=10, min_score=0.0)
     assert hits[0].source_uid == "covering@example.com"
 
 
@@ -114,10 +114,10 @@ def test_an_explicitly_quoted_phrase_stays_strict() -> None:
 
 
 def test_explicit_phrase_does_not_match_separated_tokens(indexed) -> None:
-    assert uids(keyword_search(indexed, '"Rechnung Nr 2026"', limit=10)) == {
+    assert uids(keyword_search(indexed, '"Rechnung Nr 2026"', limit=10, min_score=0.0)) == {
         "invoice@example.com"
     }
-    assert keyword_search(indexed, '"Rechnung 2026 0042 pdf Betrag"', limit=10) == []
+    assert keyword_search(indexed, '"Rechnung 2026 0042 pdf Betrag"', limit=10, min_score=0.0) == []
 
 
 # --- the other half: punctuation must never be FTS5 syntax ----------------
