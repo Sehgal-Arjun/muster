@@ -11,7 +11,11 @@ client_secret*.json
 token.json
 *token*.json
 
-# Eval output
+# Eval — the real query set names real senders, subjects and message ids from
+# a personal mailbox. Only queries.example.jsonl is ever committed. Results
+# files are redacted by default, and gitignored regardless.
+eval/queries.jsonl
+eval/queries.local.jsonl
 eval/results/
 
 # Python

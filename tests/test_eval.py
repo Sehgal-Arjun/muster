@@ -20,7 +20,8 @@ from muster.evaluate import (
 from muster.ingest import ingest_message
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample.mbox"
-SEED_QUERIES = Path(__file__).parent.parent / "eval" / "queries.jsonl"
+# The private set is gitignored; tests must use the committed example.
+EXAMPLE_QUERIES = Path(__file__).parent.parent / "eval" / "queries.example.jsonl"
 
 
 @pytest.fixture
@@ -43,9 +44,9 @@ def indexed(conn: sqlite3.Connection, cfg: Config) -> sqlite3.Connection:
 # --- loading --------------------------------------------------------------
 
 
-def test_loads_the_seed_query_file() -> None:
-    records = load_queries(SEED_QUERIES)
-    assert len(records) == 5
+def test_loads_the_example_query_file() -> None:
+    records = load_queries(EXAMPLE_QUERIES)
+    assert len(records) == 3
     assert all(r.q and r.note for r in records)
     assert all(r.relevant_doc_ids for r in records)
 
@@ -195,6 +196,7 @@ def test_run_is_written_as_readable_json(indexed, tmp_path: Path) -> None:
     assert payload["results"][0]["retrieved"]
 
 
-def test_seed_queries_all_resolve_against_the_fixture(indexed) -> None:
-    run = evaluate(indexed, load_queries(SEED_QUERIES), k=10)
-    assert run.queries_scored == 5, [r.unresolved for r in run.results]
+def test_example_queries_all_resolve_against_the_fixture(indexed) -> None:
+    """The committed example must be runnable, or a fresh clone cannot try it."""
+    run = evaluate(indexed, load_queries(EXAMPLE_QUERIES), k=10)
+    assert run.queries_scored == 3, [r.unresolved for r in run.results]

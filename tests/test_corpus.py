@@ -18,10 +18,12 @@ from muster.blobs import BlobStore
 from muster.config import Config
 from muster.connectors.mbox import MboxConnector
 from muster.evaluate import (
+    EvalError,
     QueryRecord,
     corpus_fingerprint,
     describe_corpus,
     evaluate,
+    query_id,
     snapshot,
     write_run,
 )
@@ -201,3 +203,95 @@ def test_describe_corpus_counts_only_captured_docs(indexed) -> None:
         " '2026-01-01T00:00:00Z', 'header', '2026-01-01T00:00:00Z')"
     )
     assert describe_corpus(indexed, "x").docs == 16
+
+
+# --- privacy --------------------------------------------------------------
+
+
+def test_results_are_redacted_by_default(indexed, tmp_path) -> None:
+    """A results file must not carry the contents of a personal mailbox."""
+    run = evaluate(
+        indexed,
+        [
+            QueryRecord(
+                q="what did Dr Alvarez say about the biopsy",
+                relevant_doc_ids=["file:ordinary-1@example.com"],
+                note="private note naming a real person",
+            )
+        ],
+    )
+    payload = json.loads(write_run(run, tmp_path / "results").read_text())
+    body = json.dumps(payload)
+
+    assert payload["redacted"] is True
+    assert "Alvarez" not in body, "query text must not be written to disk"
+    assert "private note" not in body
+    assert "warehouse lease renewal" not in body, "retrieved titles are mailbox contents too"
+
+
+def test_redacted_results_stay_diffable(indexed, tmp_path) -> None:
+    """Metrics and a stable query id survive, so two runs can still be compared."""
+    records = [QueryRecord(q="warehouse lease", relevant_doc_ids=["file:ordinary-1@example.com"])]
+    first = json.loads(write_run(evaluate(indexed, records), tmp_path / "a").read_text())
+    second = json.loads(write_run(evaluate(indexed, records), tmp_path / "b").read_text())
+
+    a, b = first["results"][0], second["results"][0]
+    assert a["query_id"] == b["query_id"]
+    assert a["query_id"] == query_id("warehouse lease")
+    assert a["recall_at_k"] == b["recall_at_k"]
+    assert a["retrieved"] == b["retrieved"]
+
+
+def test_include_text_is_opt_in(indexed, tmp_path) -> None:
+    run = evaluate(indexed, [QueryRecord(q="warehouse lease", relevant_doc_ids=[])])
+    payload = json.loads(
+        write_run(run, tmp_path / "results", include_text=True).read_text()
+    )
+    assert payload["redacted"] is False
+    assert payload["results"][0]["q"] == "warehouse lease"
+
+
+# --- query file resolution ------------------------------------------------
+
+
+def test_private_set_is_preferred_when_present(tmp_path, monkeypatch) -> None:
+    import muster.evaluate as ev
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "eval").mkdir()
+    (tmp_path / "eval/queries.jsonl").write_text('{"q": "private"}\n')
+    (tmp_path / "eval/queries.example.jsonl").write_text('{"q": "example"}\n')
+
+    path, is_example = ev.resolve_queries_path()
+    assert path == ev.DEFAULT_QUERIES and not is_example
+
+
+def test_falls_back_to_the_example_on_a_fresh_clone(tmp_path, monkeypatch) -> None:
+    import muster.evaluate as ev
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "eval").mkdir()
+    (tmp_path / "eval/queries.example.jsonl").write_text('{"q": "example"}\n')
+
+    path, is_example = ev.resolve_queries_path()
+    assert path == ev.EXAMPLE_QUERIES and is_example
+
+
+def test_explicit_path_wins_and_must_exist(tmp_path, monkeypatch) -> None:
+    import muster.evaluate as ev
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(EvalError, match="no query file"):
+        ev.resolve_queries_path(tmp_path / "nope.jsonl")
+
+
+def test_the_committed_example_holds_no_real_looking_identifiers() -> None:
+    """Guards the example itself against becoming a leak."""
+    import re
+
+    text = (Path(__file__).parent.parent / "eval" / "queries.example.jsonl").read_text()
+    assert not re.search(r"\b[0-9a-f]{16}\b", text), "looks like a real Gmail message id"
+    for line in text.splitlines():
+        record = json.loads(line)
+        for uid in record["relevant_doc_ids"]:
+            assert uid.startswith("file:"), "the example must reference the fixture mbox only"

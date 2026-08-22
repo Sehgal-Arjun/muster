@@ -501,8 +501,9 @@ def corpus_info(
 @app.command("eval")
 def eval_cmd(
     queries: Annotated[
-        Path, typer.Option("--queries", help="JSONL query file.")
-    ] = Path("eval/queries.jsonl"),
+        Path | None,
+        typer.Option("--queries", help="JSONL query file. Default: eval/queries.jsonl."),
+    ] = None,
     k: Annotated[int, typer.Option("--k", help="Cutoff for recall@k.")] = 10,
     mode: Annotated[str, typer.Option("--mode", help="keyword | vector | hybrid.")] = "keyword",
     results_dir: Annotated[
@@ -519,10 +520,24 @@ def eval_cmd(
     all_categories: Annotated[
         bool, typer.Option("--all-categories", help="Score without the category filter.")
     ] = False,
+    include_text: Annotated[
+        bool,
+        typer.Option(
+            "--include-text",
+            help="Write query text and result titles into the results file. Private.",
+        ),
+    ] = False,
 ) -> None:
     """Score retrieval against eval/queries.jsonl."""
     from muster.categories import DEFAULT_EXCLUDED
-    from muster.evaluate import EvalError, evaluate, load_queries, write_run
+    from muster.evaluate import (
+        EXAMPLE_QUERIES,
+        EvalError,
+        evaluate,
+        load_queries,
+        resolve_queries_path,
+        write_run,
+    )
 
     cfg = load_config()
     if corpus is None:
@@ -536,9 +551,25 @@ def eval_cmd(
 
     excluded = frozenset() if all_categories else DEFAULT_EXCLUDED
 
+    try:
+        queries_path, is_example = resolve_queries_path(queries)
+    except EvalError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    if is_example:
+        typer.echo(
+            typer.style(
+                f"using {EXAMPLE_QUERIES} — three synthetic records, not a benchmark.\n"
+                "Write your own set at eval/queries.jsonl (gitignored; see eval/README.md).",
+                fg="yellow",
+            ),
+            err=True,
+        )
+
     conn = db.connect(db_path)
     try:
-        records = load_queries(queries)
+        records = load_queries(queries_path)
         run = evaluate(
             conn, records, mode=mode, k=k,
             corpus_path=str(db_path), exclude_categories=excluded,
@@ -564,7 +595,7 @@ def eval_cmd(
         if result.unresolved:
             typer.echo(f"        unresolved ids: {', '.join(map(str, result.unresolved))}")
 
-    path = write_run(run, results_dir)
+    path = write_run(run, results_dir, include_text=include_text)
     typer.echo(
         f"\nmode {run.mode}  k {run.k}"
         f"\nrecall@{run.k}  {run.recall_at_k:.4f}"
@@ -573,7 +604,9 @@ def eval_cmd(
         f"\ncorpus     {run.corpus.fingerprint}"
         f"  ({run.corpus.docs} docs / {run.corpus.chunks} chunks)"
         f"\n           {run.corpus.path}"
+        f"\nqueries    {queries_path}"
         f"\nwrote      {path}"
+        + ("  (includes query text — keep it out of git)" if include_text else "  (redacted)")
     )
 
 

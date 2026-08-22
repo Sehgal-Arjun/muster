@@ -23,6 +23,29 @@ Each run prints a per-query line and writes a timestamped JSON file to
 `eval/results/` (gitignored) holding the full retrieved list per query, so two
 runs can be diffed to see *which* queries moved rather than only the average.
 
+## Your query set is private, and stays local
+
+| file | committed? | what it is |
+|---|---|---|
+| `queries.example.jsonl` | **yes** | three synthetic records against `tests/fixtures/sample.mbox`, showing the format |
+| `queries.jsonl` | **no — gitignored** | your real set. Names real senders, subjects and message ids |
+| `queries.local.jsonl` | **no — gitignored** | a second private set, if you want to keep experiments apart |
+| `results/` | **no — gitignored** | run output, redacted by default |
+
+`muster eval` reads `queries.jsonl` when it exists and falls back to
+`queries.example.jsonl` otherwise, printing a notice so a fallback run is never
+mistaken for a real one. Neither the queries you write nor the mail they match
+should ever reach the repository.
+
+**Results files are redacted.** A query like *"what did the clinic say about the
+biopsy"*, together with the subject lines it retrieved, is as revealing as the
+mailbox. So `results/*.json` records metrics, document ids and a stable
+`query_id` — the first twelve hex of the query's SHA-256 — and omits the query
+text, your notes, and the retrieved titles. Runs stay diffable because the
+`query_id` is stable. `--include-text` opts back in when you are debugging a
+specific query; the file it writes is gitignored, but do not go out of your way
+to share it.
+
 ## The query file
 
 `queries.jsonl`, one JSON object per line:
@@ -62,7 +85,7 @@ There are five seed records here, all pointing at `tests/fixtures/sample.mbox`
 to show the format and to prove the harness works; they are not a benchmark —
 five queries over fifteen messages cannot tell you anything.
 
-The remaining ~95 have to come from you, by hand, against your real mail. A
+The rest have to come from you, by hand, against your real mail. A
 workable routine:
 
 1. Think of something you actually needed to find recently. Write the query the

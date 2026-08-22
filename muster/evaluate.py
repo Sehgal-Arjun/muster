@@ -19,6 +19,13 @@ Runs are scored against a pinned corpus so numbers are comparable over time.
 ``muster corpus snapshot`` freezes the index; ``muster eval --corpus`` scores
 against the snapshot, and every results file records the corpus fingerprint it
 was measured on.
+
+**The real query set is private.** ``eval/queries.jsonl`` names real senders,
+subjects and message ids, and is gitignored; only ``eval/queries.example.jsonl``
+is committed, and it is the fallback when no local set exists. Results written
+to disk are redacted for the same reason: a query and the titles it retrieved
+are as revealing as the mailbox itself. Each query is identified by a stable
+hash so runs stay diffable without the text being written anywhere.
 """
 
 from __future__ import annotations
@@ -37,6 +44,30 @@ log = logging.getLogger(__name__)
 
 DEFAULT_K = 10
 
+DEFAULT_QUERIES = Path("eval/queries.jsonl")
+EXAMPLE_QUERIES = Path("eval/queries.example.jsonl")
+
+
+def query_id(text: str) -> str:
+    """A stable identifier for a query that reveals nothing about it."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def resolve_queries_path(explicit: Path | None = None) -> tuple[Path, bool]:
+    """(path, is_example). The private set if present, else the committed example."""
+    if explicit is not None:
+        path = Path(explicit)
+        if not path.exists():
+            raise EvalError(f"no query file at {path}")
+        return path, path.name == EXAMPLE_QUERIES.name
+    if DEFAULT_QUERIES.exists():
+        return DEFAULT_QUERIES, False
+    if EXAMPLE_QUERIES.exists():
+        return EXAMPLE_QUERIES, True
+    raise EvalError(
+        f"no query file at {DEFAULT_QUERIES} and no {EXAMPLE_QUERIES} to fall back on"
+    )
+
 
 @dataclass
 class QueryRecord:
@@ -47,6 +78,7 @@ class QueryRecord:
 
 @dataclass
 class QueryResult:
+    query_id: str
     q: str
     note: str
     k: int
@@ -84,8 +116,20 @@ class EvalRun:
     results: list[QueryResult]
     corpus: Corpus
 
-    def to_json(self) -> str:
+    def to_json(self, *, include_text: bool = False) -> str:
+        """Serialise a run.
+
+        Query text, notes and retrieved titles are dropped unless explicitly
+        requested: they are the contents of a personal mailbox, and a results
+        file is exactly the kind of artefact that gets committed by accident.
+        Metrics and the stable query_id survive, so two runs remain diffable.
+        """
         payload = asdict(self)
+        payload["redacted"] = not include_text
+        if not include_text:
+            for result in payload["results"]:
+                for field_name in ("q", "note", "titles"):
+                    result.pop(field_name, None)
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
@@ -255,6 +299,7 @@ def evaluate(
 
         results.append(
             QueryResult(
+                query_id=query_id(record.q),
                 q=record.q,
                 note=record.note,
                 k=k,
@@ -282,10 +327,10 @@ def evaluate(
     )
 
 
-def write_run(run: EvalRun, results_dir: Path) -> Path:
+def write_run(run: EvalRun, results_dir: Path, *, include_text: bool = False) -> Path:
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     stamp = run.started_at.replace(":", "").replace("-", "").split(".")[0]
     path = results_dir / f"{stamp}-{run.mode}-k{run.k}-{run.corpus.fingerprint}.json"
-    path.write_text(run.to_json(), encoding="utf-8")
+    path.write_text(run.to_json(include_text=include_text), encoding="utf-8")
     return path

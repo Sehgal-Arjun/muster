@@ -1,0 +1,3 @@
+{"q": "warehouse lease renewal price per month", "relevant_doc_ids": ["file:ordinary-1@example.com"], "note": "Literal: a distinctive phrase that appears verbatim in the body. BM25 should rank this first; if it ever misses, something is badly broken."}
+{"q": "Angebot Solaranlage Gesamtpreis", "relevant_doc_ids": ["file:deutsch-2@beispiel.de"], "note": "Multilingual: German body in ISO-8859-1 with an RFC2047-encoded subject. Exercises charset handling end to end."}
+{"q": "Rechnung_2026-0042.pdf", "relevant_doc_ids": ["file:attachment-5@lieferant.de", "file:attachment-5@lieferant.de#att0"], "note": "Filename, multi-answer: should return both the covering message and the extracted PDF as a document in its own right."}
