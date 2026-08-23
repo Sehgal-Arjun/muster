@@ -66,6 +66,11 @@ class SearchConfig:
     # Drop results below this fraction of the best hit. Scale-free, and what
     # removes the flat tail that RRF in particular produces.
     min_score_ratio: float = 0.25
+    # Unequal so RRF can never tie two arms at rank 1. Not a relevance weight:
+    # any value below 1.0 scores identically on the real query set, so this
+    # only decides ties, and it decides them toward exact lexical evidence.
+    rrf_keyword_weight: float = 1.0
+    rrf_vector_weight: float = 0.9
 
 
 # Automated senders whose volume drowns real correspondence. Gmail files GitHub
@@ -173,6 +178,8 @@ def load_config(home: Path | None = None) -> Config:
             min_score_vector=float(search.get("min_score_vector", 0.45)),
             min_score_hybrid=float(search.get("min_score_hybrid", 0.0)),
             min_score_ratio=float(search.get("min_score_ratio", 0.25)),
+            rrf_keyword_weight=float(search.get("rrf_keyword_weight", 1.0)),
+            rrf_vector_weight=float(search.get("rrf_vector_weight", 0.9)),
         ),
         redaction=_redaction_config(redaction),
         excluded_senders=tuple(

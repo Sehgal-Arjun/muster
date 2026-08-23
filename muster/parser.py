@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from email.message import Message
 from typing import Any
 
+from muster import ldjson
 from muster.extract import decode_text
 from muster.quoting import clean_body
 
@@ -341,15 +342,30 @@ def parse_message(
 
     # text/plain wins; HTML is converted only when it is all we were sent.
     joined_plain = "\n\n".join(p for p in plain if p.strip()).strip()
+    joined_html_all = "\n".join(h for h in html if h.strip())
+
+    # JSON-LD is read from the untouched part text, before scripts are stripped
+    # from the HTML and before URL collapsing rewrites the schema.org enum URLs
+    # the block uses to state its own values. Both parts are scanned because
+    # senders duplicate the block across them; the renderer deduplicates.
+    structured = ldjson.render(f"{joined_plain}\n{joined_html_all}")
+    if structured:
+        warnings.append("rendered a JSON-LD block")
+
     if joined_plain:
-        body = clean_body(joined_plain, is_html=False)
+        body = clean_body(ldjson.strip_bare_blocks(joined_plain), is_html=False)
         body_mime = "text/plain"
     else:
-        joined_html = "\n".join(h for h in html if h.strip())
+        joined_html = joined_html_all
         body = clean_body(joined_html, is_html=True) if joined_html else ""
         body_mime = "text/html" if joined_html else "text/plain"
         if not body and joined_html:
             warnings.append("html body produced no text")
+
+    # Structured data leads: a flight's confirmation code and route are the
+    # part of the message a person is most likely to search for.
+    if structured:
+        body = f"{structured}\n\n{body}".strip()
 
     subject = _header(msg, "Subject") or NO_SUBJECT
     from_addrs = _addresses(msg, "From")

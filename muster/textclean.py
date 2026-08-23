@@ -22,6 +22,20 @@ import re
 INVISIBLE_CHARS = "​‌‍͏­﻿⁠"
 _INVISIBLE_RE = re.compile(f"[{INVISIBLE_CHARS}]")
 
+# The same padding, HTML-escaped, in a text/plain part where nothing unescapes
+# it. Alaska's plain part is a hundred literal "&zwnj;" in a row. Only the
+# invisible entities are decoded here: unescaping a plain-text body wholesale
+# would rewrite "&amp;" in prose that meant it literally.
+_INVISIBLE_ENTITY_RE = re.compile(
+    r"""(?xi)
+    &(?:
+        zwnj | zwj | nbsp | shy | lrm | rlm          # named
+      | \#x0*(?: 200b|200c|200d|feff|ad|2060|34f )   # hexadecimal
+      | \#0*(?: 8203|8204|8205|65279|173|8288|847|160 )  # decimal
+    );
+    """
+)
+
 # Trailing characters excluded so a URL at the end of a sentence keeps its
 # punctuation out of the domain.
 _URL_RE = re.compile(
@@ -55,8 +69,8 @@ MIN_ALNUM_RATIO = 0.5
 
 
 def strip_invisibles(text: str) -> str:
-    """Remove zero-width padding. Whitespace runs are collapsed afterwards."""
-    return _INVISIBLE_RE.sub("", text)
+    """Remove zero-width padding, literal or HTML-escaped."""
+    return _INVISIBLE_RE.sub("", _INVISIBLE_ENTITY_RE.sub("", text))
 
 
 def registrable_domain(host: str) -> str:

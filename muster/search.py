@@ -384,21 +384,36 @@ def vector_search(
 
 
 def reciprocal_rank_fusion(
-    rankings: list[list[Hit]], *, k: int = RRF_K, limit: int = DEFAULT_LIMIT
+    rankings: list[list[Hit]],
+    *,
+    k: int = RRF_K,
+    limit: int = DEFAULT_LIMIT,
+    weights: list[float] | None = None,
 ) -> list[Hit]:
-    """Fuse ranked lists by 1/(k + rank), summed per document.
+    """Fuse ranked lists by w/(k + rank), summed per document.
 
     RRF uses only positions, never the underlying scores, which is the whole
     point: BM25 scores and cosine similarities are not on comparable scales and
     any attempt to weight them directly needs a calibration constant that would
     have to be re-tuned per corpus.
+
+    Discarding magnitude has one degenerate case. When each arm returns a
+    different document at rank 1, both score exactly 1/(k+1) and the tie is
+    broken arbitrarily — so a search for the confirmation code "MXUFEM", which
+    BM25 matches exactly at 12.35, lost to whatever the vector arm happened to
+    return for a token its model has never seen. Unequal weights make ties
+    impossible. The size of the difference does not matter and is not a tuning
+    knob: measured on the real query set, every vector weight from 0.5 to 0.9
+    gives identical recall and MRR, which is what it looks like when the only
+    thing being changed is a tie.
     """
     scores: dict[int, float] = {}
     representative: dict[int, Hit] = {}
+    weights = weights or [1.0] * len(rankings)
 
-    for ranking in rankings:
+    for ranking, weight in zip(rankings, weights, strict=True):
         for rank, hit in enumerate(ranking, start=1):
-            scores[hit.doc_id] = scores.get(hit.doc_id, 0.0) + 1.0 / (k + rank)
+            scores[hit.doc_id] = scores.get(hit.doc_id, 0.0) + weight / (k + rank)
             # Keep the first list's snippet: keyword snippets show the match,
             # vector ones are just the head of the chunk.
             representative.setdefault(hit.doc_id, hit)
@@ -453,7 +468,14 @@ def hybrid_search(
         logging.getLogger(__name__).warning("hybrid falling back to keyword: %s", exc)
         return keyword[:limit]
 
-    fused = reciprocal_rank_fusion([keyword, vector], limit=limit)
+    from muster.config import load_config
+
+    cfg = load_config().search
+    fused = reciprocal_rank_fusion(
+        [keyword, vector],
+        limit=limit,
+        weights=[cfg.rrf_keyword_weight, cfg.rrf_vector_weight],
+    )
     fused_floor = _floor("hybrid")
     if fused_floor:
         fused = [hit for hit in fused if hit.score >= fused_floor]

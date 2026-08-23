@@ -252,3 +252,29 @@ def test_rrf_deduplicates_and_respects_limit() -> None:
     fused = reciprocal_rank_fusion([[_hit(i) for i in range(20)]] * 2, limit=5)
     assert len(fused) == 5
     assert len({h.doc_id for h in fused}) == 5
+
+
+def test_rrf_weights_make_a_rank_one_tie_impossible() -> None:
+    """The MXUFEM case: each arm returns a different document at rank 1.
+
+    Unweighted, both score exactly 1/(k+1) and the winner is arbitrary — an
+    exact BM25 match lost to a vector hit on a token its model had never seen.
+    """
+    keyword = [_hit(1)]
+    vector = [_hit(2)]
+
+    tied = reciprocal_rank_fusion([keyword, vector], limit=2)
+    assert tied[0].score == tied[1].score, "unweighted, this is a coin flip"
+
+    fused = reciprocal_rank_fusion([keyword, vector], limit=2, weights=[1.0, 0.9])
+    assert fused[0].doc_id == 1
+    assert fused[0].score > fused[1].score
+
+
+def test_weighting_does_not_override_genuine_agreement() -> None:
+    """A document both arms rank must still beat one only the keyword arm has."""
+    keyword = [_hit(1), _hit(2)]
+    vector = [_hit(2), _hit(9)]
+
+    fused = reciprocal_rank_fusion([keyword, vector], limit=3, weights=[1.0, 0.9])
+    assert fused[0].doc_id == 2
