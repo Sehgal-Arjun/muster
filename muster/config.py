@@ -49,7 +49,7 @@ class SearchConfig:
     same thing in all three.
     """
 
-    title_weight: float = 3.0
+    title_weight: float = 1.0
     text_weight: float = 1.0
     # Applied to each arm's native score. Below this, a result is noise, and
     # ten confident-looking wrong answers are worse than none.
@@ -57,11 +57,21 @@ class SearchConfig:
     # index and query at search time. Measured on a 1447-chunk index: queries
     # with a real answer score 4.9-13.8, queries without one 1.8-3.7.
     min_score_keyword: float = 4.0
-    min_score_vector: float = 0.60
+    # 0.60 was a guess and it cost 13 points of vector recall on a real
+    # 23-query set. Measured: every value up to 0.50 scores identically, so the
+    # floor sits below that with margin. Hybrid is unaffected at any value —
+    # the keyword arm covers what the vector floor removes.
+    min_score_vector: float = 0.45
     min_score_hybrid: float = 0.0  # arms are already floored before fusion
     # Drop results below this fraction of the best hit. Scale-free, and what
     # removes the flat tail that RRF in particular produces.
     min_score_ratio: float = 0.25
+
+
+# Automated senders whose volume drowns real correspondence. Gmail files GitHub
+# under `updates`, alongside receipts and shipping notices, so the category axis
+# cannot separate them — the sender can.
+DEFAULT_EXCLUDED_SENDERS: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -104,6 +114,9 @@ class Config:
     embed: EmbedConfig = field(default_factory=EmbedConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     redaction: RedactionConfig = field(default_factory=RedactionConfig)
+    # Addresses ("notifications@github.com") or bare domains ("substack.com",
+    # matching subdomains too). Empty by default: this is a personal list.
+    excluded_senders: tuple[str, ...] = DEFAULT_EXCLUDED_SENDERS
     # Your own addresses, so `counterparty` can name the other party rather
     # than you. Empty is fine: outbound mail is then detected by label alone.
     own_addresses: frozenset[str] = frozenset()
@@ -154,14 +167,17 @@ def load_config(home: Path | None = None) -> Config:
             prepend_title=bool(embed.get("prepend_title", False)),
         ),
         search=SearchConfig(
-            title_weight=float(search.get("title_weight", 3.0)),
+            title_weight=float(search.get("title_weight", 1.0)),
             text_weight=float(search.get("text_weight", 1.0)),
             min_score_keyword=float(search.get("min_score_keyword", 4.0)),
-            min_score_vector=float(search.get("min_score_vector", 0.60)),
+            min_score_vector=float(search.get("min_score_vector", 0.45)),
             min_score_hybrid=float(search.get("min_score_hybrid", 0.0)),
             min_score_ratio=float(search.get("min_score_ratio", 0.25)),
         ),
         redaction=_redaction_config(redaction),
+        excluded_senders=tuple(
+            str(a) for a in raw.get("senders", {}).get("excluded", DEFAULT_EXCLUDED_SENDERS)
+        ),
         own_addresses=frozenset(
             a.lower() for a in raw.get("identity", {}).get("addresses", [])
         ),

@@ -200,3 +200,69 @@ def test_example_queries_all_resolve_against_the_fixture(indexed) -> None:
     """The committed example must be runnable, or a fresh clone cannot try it."""
     run = evaluate(indexed, load_queries(EXAMPLE_QUERIES), k=10)
     assert run.queries_scored == 3, [r.unresolved for r in run.results]
+
+
+# --- verify ---------------------------------------------------------------
+
+
+def test_verify_passes_on_ground_truth_that_resolves(indexed) -> None:
+    from muster.evaluate import verify
+
+    report = verify(indexed, load_queries(EXAMPLE_QUERIES))
+    assert report.clean
+    assert report.resolvable == report.queries
+    assert report.bad_ids == 0
+
+
+def test_verify_names_queries_with_no_resolvable_id(indexed) -> None:
+    """These are silently skipped by the scorer, so the average flatters itself."""
+    from muster.evaluate import QueryRecord, verify
+
+    records = [
+        QueryRecord(q="real one", relevant_doc_ids=["file:ordinary-1@example.com"]),
+        QueryRecord(q="invented", relevant_doc_ids=["gmail:19aabbccddeeff00"]),
+    ]
+    report = verify(indexed, records)
+
+    assert not report.clean
+    assert report.resolvable == 1
+    assert [q for q, _ids in report.unscoreable] == ["invented"]
+    assert report.unscoreable[0][1] == ["gmail:19aabbccddeeff00"]
+
+
+def test_verify_flags_partially_bad_ground_truth(indexed) -> None:
+    from muster.evaluate import QueryRecord, verify
+
+    report = verify(
+        indexed,
+        [
+            QueryRecord(
+                q="half right",
+                relevant_doc_ids=["file:ordinary-1@example.com", "gmail:deadbeefdeadbeef"],
+            )
+        ],
+    )
+    assert report.resolvable == 1
+    assert report.partial[0][1] == ["gmail:deadbeefdeadbeef"]
+    assert report.bad_ids == 1
+
+
+def test_verify_reports_ids_shared_between_queries(indexed) -> None:
+    from muster.evaluate import QueryRecord, verify
+
+    uid = "file:ordinary-1@example.com"
+    report = verify(
+        indexed,
+        [QueryRecord(q="a", relevant_doc_ids=[uid]), QueryRecord(q="b", relevant_doc_ids=[uid])],
+    )
+    assert report.duplicates == [uid]
+
+
+def test_verify_runs_no_retrieval(indexed, monkeypatch) -> None:
+    """It must be usable on a query file before trusting any numbers."""
+    import muster.evaluate as ev
+
+    monkeypatch.setattr(
+        ev, "search", lambda *a, **k: pytest.fail("verify must not search")
+    )
+    ev.verify(indexed, load_queries(EXAMPLE_QUERIES))

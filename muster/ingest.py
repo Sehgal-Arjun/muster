@@ -85,6 +85,11 @@ def build_chunks(parsed: ParsedMessage) -> list[str]:
         # Nothing searchable, deliberately — not even the subject, which is
         # where the code usually is.
         return []
+    if parsed.excluded_sender:
+        # Reached only by reparse: sync drops these before they are stored.
+        # Leaving zero chunks makes an already-indexed one unsearchable without
+        # deleting it behind the user's back; `muster purge` does the deleting.
+        return []
     chunks = _annotate_with_filenames(chunk_text(parsed.body), parsed.attachments)
     chunks = filter_chunks(chunks)
     if chunks:
@@ -125,6 +130,7 @@ def ingest_message(
     meta: dict | None = None,
     own_addresses: set[str] | None = None,
     redactor=None,
+    sender_filter=None,
 ) -> IngestResult:
     """Ingest one raw message. Returns without writing if it is already indexed."""
     meta = meta or {}
@@ -133,7 +139,8 @@ def ingest_message(
         return IngestResult(doc_id=existing, created=False)
 
     parsed = parse_message(
-        raw, source_uid, meta, own_addresses=own_addresses, redactor=redactor
+        raw, source_uid, meta, own_addresses=own_addresses, redactor=redactor,
+        sender_filter=sender_filter,
     )
     for warning in parsed.warnings:
         log.warning("%s/%s: %s", source, source_uid, warning)
@@ -196,8 +203,8 @@ def _insert_doc(
         INSERT INTO docs (
             source, source_uid, origin, content_hash, blob_path, mime, title,
             doc_date, date_source, counterparty, thread_uid, meta_json,
-            category, ingested_at
-        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            category, sender, ingested_at
+        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source,
@@ -212,6 +219,7 @@ def _insert_doc(
             parsed.thread_uid,
             json.dumps({**parsed.headers, **meta_extra}, default=str),
             category_of(parsed.headers.get("labels")),
+            (parsed.headers.get("from") or [None])[0],
             _now(),
         ),
     )
@@ -302,8 +310,8 @@ def _insert_attachment_doc(
         INSERT INTO docs (
             source, source_uid, origin, content_hash, blob_path, mime, title,
             doc_date, date_source, counterparty, thread_uid, meta_json,
-            category, ingested_at
-        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            category, sender, ingested_at
+        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source,
@@ -325,6 +333,7 @@ def _insert_attachment_doc(
                 default=str,
             ),
             category_of(parent.headers.get("labels")),
+            (parent.headers.get("from") or [None])[0],
             _now(),
         ),
     )

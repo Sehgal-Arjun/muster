@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from muster.db import transaction
 
@@ -29,6 +29,7 @@ class PurgePlan:
     vectors: int
     attachments: int
     titles: list[str]
+    senders: list[tuple[str, int]] = field(default_factory=list)
 
     @property
     def empty(self) -> bool:
@@ -36,10 +37,17 @@ class PurgePlan:
 
 
 def _selector(
-    source: str | None, uid_prefix: str | None, category: str | None
+    source: str | None,
+    uid_prefix: str | None,
+    category: str | None,
+    sender_filter=None,
 ) -> tuple[str, dict]:
     clauses: list[str] = []
     params: dict[str, object] = {}
+    if sender_filter is not None and sender_filter:
+        predicate, sender_params = sender_filter.sql_predicate("d.sender")
+        clauses.append(predicate)
+        params.update(sender_params)
     if source:
         clauses.append("d.source = :source")
         params["source"] = source
@@ -60,9 +68,10 @@ def plan(
     source: str | None = None,
     uid_prefix: str | None = None,
     category: str | None = None,
+    sender_filter=None,
 ) -> PurgePlan:
     """What a purge would remove. Always run before doing it."""
-    where, params = _selector(source, uid_prefix, category)
+    where, params = _selector(source, uid_prefix, category, sender_filter)
 
     ids = [
         row[0] for row in conn.execute(f"SELECT d.id FROM docs d WHERE {where}", params)
@@ -91,7 +100,17 @@ def plan(
             params,
         )
     ]
-    return PurgePlan(len(ids), counts["chunks"], counts["vectors"], counts["attachments"], titles)
+    senders = [
+        (row[0] or "(unknown)", row[1])
+        for row in conn.execute(
+            f"SELECT d.sender, count(*) FROM docs d WHERE {where}"
+            " GROUP BY 1 ORDER BY 2 DESC LIMIT 12",
+            params,
+        )
+    ]
+    return PurgePlan(
+        len(ids), counts["chunks"], counts["vectors"], counts["attachments"], titles, senders
+    )
 
 
 def purge(
@@ -100,13 +119,17 @@ def purge(
     source: str | None = None,
     uid_prefix: str | None = None,
     category: str | None = None,
+    sender_filter=None,
 ) -> PurgePlan:
     """Delete matching documents. Chunks, vectors and FTS rows follow by cascade."""
-    before = plan(conn, source=source, uid_prefix=uid_prefix, category=category)
+    before = plan(
+        conn, source=source, uid_prefix=uid_prefix, category=category,
+        sender_filter=sender_filter,
+    )
     if before.empty:
         return before
 
-    where, params = _selector(source, uid_prefix, category)
+    where, params = _selector(source, uid_prefix, category, sender_filter)
     with transaction(conn):
         # Attachment rows first: extracted_doc_id has no ON DELETE behaviour, so
         # deleting a child document out from under it would leave a dangling

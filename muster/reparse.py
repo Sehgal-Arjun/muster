@@ -160,7 +160,9 @@ def _new_signature(parsed, new_chunks: list[str], plan) -> tuple:
     )
 
 
-_DOC_FIELDS = ("title", "doc_date", "date_source", "counterparty", "thread_uid", "category")
+_DOC_FIELDS = (
+    "title", "doc_date", "date_source", "counterparty", "thread_uid", "category", "sender",
+)
 
 
 def reparse_doc(
@@ -171,6 +173,7 @@ def reparse_doc(
     own_addresses: set[str] | None = None,
     force: bool = False,
     redactor=None,
+    sender_filter=None,
 ) -> tuple[bool, int, int, int]:
     """Rebuild one document. Returns (changed, chunks_before, chunks_after, vectors_kept)."""
     doc_id = int(row["id"])
@@ -192,7 +195,8 @@ def reparse_doc(
     }
 
     parsed = parse_message(
-        raw, row["source_uid"], meta, own_addresses=own_addresses, redactor=redactor
+        raw, row["source_uid"], meta, own_addresses=own_addresses, redactor=redactor,
+        sender_filter=sender_filter,
     )
     new_chunks = build_chunks(parsed)
     plan = attachment_plan(parsed)
@@ -212,6 +216,7 @@ def reparse_doc(
         "counterparty": parsed.counterparty,
         "thread_uid": parsed.thread_uid,
         "category": category_of(parsed.headers.get("labels")),
+        "sender": (parsed.headers.get("from") or [None])[0],
     }
 
     # A message with no usable timestamp anywhere was stamped with the time it
@@ -314,6 +319,7 @@ def reparse(
     own_addresses: set[str] | None = None,
     force: bool = False,
     redactor=None,
+    sender_filter=None,
     progress=None,
 ) -> ReparseReport:
     """Rebuild chunks, attachments and categories from stored raw bytes."""
@@ -324,7 +330,7 @@ def reparse(
         try:
             changed, before, after, kept = reparse_doc(
                 conn, store, row, own_addresses=own_addresses, force=force,
-                redactor=redactor,
+                redactor=redactor, sender_filter=sender_filter,
             )
         except BlobNotFound:
             report.failed += 1

@@ -65,6 +65,10 @@ def status(
     months_shown: Annotated[
         int, typer.Option("--months", help="How many months of history to break down.")
     ] = 18,
+    senders: Annotated[
+        bool, typer.Option("--senders", help="Break down by sender instead of by month.")
+    ] = False,
+    top: Annotated[int, typer.Option("--top", help="How many senders to list.")] = 30,
 ) -> None:
     """Show where the data lives and which migrations are applied."""
     cfg = load_config()
@@ -82,9 +86,17 @@ def status(
         }
         # A document with no chunks matches no query. That is how a parser
         # regression hides, so it gets its own line rather than being inferred.
+        # Redacted documents have no chunks on purpose. Counting them here
+        # would bury the signal this number exists for: a parser regression
+        # that quietly made real mail unsearchable.
         unfindable = conn.execute(
             "SELECT count(*) FROM docs d WHERE d.origin = 'captured'"
             " AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_id = d.id)"
+            " AND coalesce(json_extract(d.meta_json, '$.redacted_by'), '') = ''"
+        ).fetchone()[0]
+        redacted = conn.execute(
+            "SELECT count(*) FROM docs d"
+            " WHERE coalesce(json_extract(d.meta_json, '$.redacted_by'), '') != ''"
         ).fetchone()[0]
         categories = conn.execute(
             "SELECT COALESCE(category, '-'), count(*) FROM docs GROUP BY 1 ORDER BY 2 DESC"
@@ -99,6 +111,17 @@ def status(
                    count(*)
             FROM docs WHERE origin = 'captured' GROUP BY 1 ORDER BY 2 DESC
             """
+        ).fetchall()
+        sender_rows = conn.execute(
+            """
+            SELECT d.sender,
+                   count(DISTINCT d.id) AS docs,
+                   count(c.id)          AS chunks
+            FROM docs d LEFT JOIN chunks c ON c.doc_id = d.id
+            WHERE d.origin = 'captured' AND d.mime = 'message/rfc822'
+            GROUP BY d.sender ORDER BY docs DESC LIMIT :top
+            """,
+            {"top": top},
         ).fetchall()
         months = conn.execute(
             """
@@ -123,6 +146,7 @@ def status(
         typer.echo(f"{table:<13}{n}")
     style = typer.style(str(unfindable), fg="yellow") if unfindable else "0"
     typer.echo(f"{'unfindable':<13}{style}  (captured docs with no chunks)")
+    typer.echo(f"{'redacted':<13}{redacted}  (credentials, deliberately unindexed)")
     if categories:
         summary = "  ".join(f"{name} {count}" for name, count in categories)
         typer.echo(f"{'categories':<13}{summary}")
@@ -130,6 +154,18 @@ def status(
     typer.echo("\nby kind")
     for kind, count in kinds:
         typer.echo(f"  {kind:<26}{count:>7}")
+
+    if senders:
+        typer.echo(f"\nby sender (top {len(sender_rows)})")
+        typer.echo(f"  {'docs':>7}{'chunks':>9}  {'excl':<5}sender")
+        from muster.senders import SenderFilter
+
+        active = SenderFilter(cfg.excluded_senders)
+        for sender, docs_n, chunks_n in sender_rows:
+            mark = "yes" if active.match([sender or ""]) else ""
+            line = f"  {docs_n:>7}{chunks_n:>9}  {mark:<5}{(sender or '(unknown)')[:58]}"
+            typer.echo(typer.style(line, dim=True) if mark else line)
+        return
 
     if months:
         # distinct_bytes below docs is duplication: the same message stored
@@ -141,6 +177,24 @@ def status(
             dup = docs_n - distinct_n
             flag = typer.style(f"{dup:>5}", fg="yellow") if dup else f"{dup:>5}"
             typer.echo(f"  {month or '?':<10}{docs_n:>7}{distinct_n:>10}{threads_n:>9}{flag}")
+
+
+def _sender_excluded(raw: bytes, sender_filter) -> bool:
+    """Read just the From header, without parsing the whole message.
+
+    Sync throws these away before anything is stored, so paying for a full MIME
+    parse of mail we are about to discard would be the wrong order of work.
+    """
+    import email
+    import email.policy
+    import email.utils
+
+    try:
+        head = email.message_from_bytes(raw[:8192], policy=email.policy.default)
+        addresses = [a for _n, a in email.utils.getaddresses([head.get("From") or ""]) if a]
+    except Exception:
+        return False
+    return sender_filter.match(addresses) is not None
 
 
 def _require_db(cfg):
@@ -166,12 +220,14 @@ def _drain(
     from muster.categories import is_excluded
     from muster.ingest import ingest_message
     from muster.redaction import Redactor
+    from muster.senders import SenderFilter
 
     conn = db.connect(cfg.db_path)
     store = BlobStore(cfg.blob_dir)
     seen = created = skipped = failed = attachment_docs = chunks = filtered = 0
-    redacted = dropped_by_rule = 0
+    redacted = dropped_by_rule = by_sender = 0
     redactor = Redactor(cfg.redaction)
+    sender_filter = SenderFilter(cfg.excluded_senders)
 
     def on_page(total: int, pages: int, more: bool) -> None:
         tail = "" if more else " (complete)"
@@ -189,6 +245,9 @@ def _drain(
             ):
                 filtered += 1
                 continue
+            if sender_filter and _sender_excluded(message.raw, sender_filter):
+                by_sender += 1
+                continue
             try:
                 result = ingest_message(
                     conn,
@@ -199,6 +258,7 @@ def _drain(
                     meta=message.meta,
                     own_addresses=set(cfg.own_addresses),
                     redactor=redactor,
+                    sender_filter=sender_filter,
                 )
             except Exception as exc:
                 failed += 1
@@ -234,6 +294,7 @@ def _drain(
         f"\n  {len(dropped)} unfetchable (dropped before parsing)"
         f"\n  {filtered} filtered by category"
         f"\n  {dropped_by_rule} dropped by a redaction rule"
+        f"\n  {by_sender} skipped by sender exclusion"
         f"\n  {created} newly indexed"
         f"\n  {skipped} already indexed"
         f"\n  {failed} failed to parse"
@@ -241,7 +302,9 @@ def _drain(
     )
     if redacted:
         typer.echo(f"  {redacted} redacted (credentials kept out of the index)")
-    if listed != len(dropped) + filtered + dropped_by_rule + created + skipped + failed:
+    if listed != (
+        len(dropped) + filtered + by_sender + dropped_by_rule + created + skipped + failed
+    ):
         typer.echo(
             typer.style("  warning: counters do not reconcile", fg="yellow"), err=True
         )
@@ -473,6 +536,13 @@ def purge(
     category: Annotated[
         str | None, typer.Option("--category", help="Purge one Gmail category.")
     ] = None,
+    excluded_senders: Annotated[
+        bool,
+        typer.Option(
+            "--excluded-senders",
+            help="Purge mail from every sender on the config exclusion list.",
+        ),
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would go, change nothing.")
     ] = False,
@@ -481,15 +551,22 @@ def purge(
     """Remove documents from the index. Blobs are kept; originals are immutable."""
     from muster.purge import plan as purge_plan
     from muster.purge import purge as run_purge
+    from muster.senders import SenderFilter
 
     cfg = load_config()
     _require_db(cfg)
+
+    sender_filter = SenderFilter(cfg.excluded_senders) if excluded_senders else None
+    if excluded_senders and not sender_filter:
+        typer.echo("no senders configured under [senders] excluded", err=True)
+        raise typer.Exit(1)
 
     conn = db.connect(cfg.db_path)
     try:
         try:
             preview = purge_plan(
-                conn, source=source, uid_prefix=uid_prefix, category=category
+                conn, source=source, uid_prefix=uid_prefix, category=category,
+                sender_filter=sender_filter,
             )
         except ValueError as exc:
             typer.echo(f"{exc}. Pass --source, --uid-prefix or --category.", err=True)
@@ -503,8 +580,10 @@ def purge(
             f"would remove {preview.docs} docs, {preview.chunks} chunks,"
             f" {preview.vectors} vectors, {preview.attachments} attachment rows"
         )
-        for title in preview.titles:
-            typer.echo(f"  {title[:76]}")
+        for sender, count in preview.senders:
+            typer.echo(f"  {count:>6}  {sender}")
+        for title in preview.titles[:6]:
+            typer.echo(f"    {title[:74]}")
         if preview.docs > len(preview.titles):
             typer.echo(f"  … and {preview.docs - len(preview.titles)} more")
 
@@ -515,7 +594,10 @@ def purge(
             typer.echo("cancelled")
             return
 
-        done = run_purge(conn, source=source, uid_prefix=uid_prefix, category=category)
+        done = run_purge(
+            conn, source=source, uid_prefix=uid_prefix, category=category,
+            sender_filter=sender_filter,
+        )
     finally:
         conn.close()
 
@@ -544,6 +626,7 @@ def reparse(
     """
     from muster.redaction import Redactor
     from muster.reparse import reparse as run_reparse
+    from muster.senders import SenderFilter
 
     cfg = load_config()
     _require_db(cfg)
@@ -564,6 +647,7 @@ def reparse(
             own_addresses=set(cfg.own_addresses),
             force=force,
             redactor=Redactor(cfg.redaction),
+            sender_filter=SenderFilter(cfg.excluded_senders),
             progress=show,
         )
     finally:
@@ -638,8 +722,86 @@ def corpus_info(
     )
 
 
-@app.command("eval")
+eval_app = typer.Typer(
+    name="eval", help="Score retrieval against eval/queries.jsonl.",
+    invoke_without_command=True,
+)
+app.add_typer(eval_app)
+
+
+@eval_app.command("verify")
+def eval_verify(
+    queries: Annotated[
+        Path | None, typer.Option("--queries", help="JSONL query file.")
+    ] = None,
+    corpus: Annotated[
+        Path | None, typer.Option("--corpus", help="Verify against a frozen corpus.")
+    ] = None,
+) -> None:
+    """Check the query file's ground truth resolves, without running retrieval."""
+    from muster.evaluate import EvalError, load_queries, resolve_queries_path, verify
+
+    cfg = load_config()
+    db_path = corpus or cfg.db_path
+    if not db_path.exists():
+        typer.echo(f"no database at {db_path}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        queries_path, _is_example = resolve_queries_path(queries)
+        records = load_queries(queries_path)
+    except EvalError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    conn = db.connect(db_path)
+    try:
+        report = verify(conn, records)
+    finally:
+        conn.close()
+
+    typer.echo(f"{queries_path}  ->  {db_path}")
+    typer.echo(
+        f"{report.queries} queries, {report.resolvable} scoreable, "
+        f"{report.total_ids} ids of which {report.bad_ids} do not resolve"
+    )
+
+    if report.unscoreable:
+        typer.echo(
+            typer.style(
+                f"\n{len(report.unscoreable)} queries have NO resolvable id "
+                "(silently skipped by the scorer):",
+                fg="red",
+            )
+        )
+        for question, ids in report.unscoreable:
+            typer.echo(f"  {question[:72]}")
+            for value in ids:
+                typer.echo(f"      {value}")
+
+    if report.partial:
+        typer.echo(
+            typer.style(f"\n{len(report.partial)} queries have some bad ids:", fg="yellow")
+        )
+        for question, ids in report.partial:
+            typer.echo(f"  {question[:72]}")
+            for value in ids:
+                typer.echo(f"      {value}")
+
+    if report.duplicates:
+        typer.echo(f"\nids appearing in more than one query: {len(report.duplicates)}")
+        for value in report.duplicates[:10]:
+            typer.echo(f"  {value}")
+
+    if report.clean:
+        typer.echo(typer.style("\nall ground truth resolves", fg="green"))
+    else:
+        raise typer.Exit(1)
+
+
+@eval_app.callback(invoke_without_command=True)
 def eval_cmd(
+    ctx: typer.Context,
     queries: Annotated[
         Path | None,
         typer.Option("--queries", help="JSONL query file. Default: eval/queries.jsonl."),
@@ -669,6 +831,9 @@ def eval_cmd(
     ] = False,
 ) -> None:
     """Score retrieval against eval/queries.jsonl."""
+    if ctx.invoked_subcommand is not None:
+        return
+
     from muster.categories import DEFAULT_EXCLUDED
     from muster.evaluate import (
         EXAMPLE_QUERIES,

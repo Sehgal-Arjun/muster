@@ -62,6 +62,9 @@ class ParsedMessage:
     # Set when a redaction rule fired. The body is already emptied by then;
     # this records why, so the decision is auditable from meta_json.
     redacted_by: str | None = None
+    # Set when the sender is on the exclusion list. Distinct from redaction:
+    # nothing here is sensitive, it is simply not worth indexing.
+    excluded_sender: str | None = None
 
 
 # --- header helpers -------------------------------------------------------
@@ -325,6 +328,7 @@ def parse_message(
     *,
     own_addresses: set[str] | None = None,
     redactor=None,
+    sender_filter=None,
 ) -> ParsedMessage:
     """Turn RFC822 bytes into a ParsedMessage. Never raises."""
     meta = meta or {}
@@ -368,6 +372,10 @@ def parse_message(
             attachments = []
             warnings.append(f"redacted by rule {hit.rule!r}")
 
+    excluded_sender = sender_filter.match(from_addrs) if sender_filter is not None else None
+    if excluded_sender:
+        warnings.append(f"sender excluded by {excluded_sender!r}")
+
     if not redacted_by and not body.strip() and not attachments:
         warnings.append("empty body and no attachments")
 
@@ -391,7 +399,9 @@ def parse_message(
             "in_reply_to": _header(msg, "In-Reply-To") or None,
             "labels": labels,
             "redacted_by": redacted_by,
+            "excluded_sender": excluded_sender,
         },
         warnings=warnings,
         redacted_by=redacted_by,
+        excluded_sender=excluded_sender,
     )

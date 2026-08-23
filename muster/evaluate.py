@@ -258,6 +258,62 @@ def snapshot(conn: sqlite3.Connection, destination: Path) -> Path:
     return destination
 
 
+@dataclass
+class VerifyReport:
+    """Ground-truth health, checked before any retrieval runs."""
+
+    queries: int
+    resolvable: int
+    unscoreable: list[tuple[str, list[str]]]   # query, all of its ids
+    partial: list[tuple[str, list[str]]]       # query, the ids that failed
+    duplicates: list[str]
+    total_ids: int
+    bad_ids: int
+
+    @property
+    def clean(self) -> bool:
+        return not self.unscoreable and not self.partial and not self.duplicates
+
+
+def verify(conn: sqlite3.Connection, records: list[QueryRecord]) -> VerifyReport:
+    """Check every relevant_doc_id against the index without searching.
+
+    Ground truth written by something other than the person who owns the
+    mailbox can name documents that do not exist. A query whose ids all fail is
+    silently skipped by the scorer, so a query set can rot down to a handful of
+    scored records while still reporting an average — which looks like a result
+    and is not one.
+    """
+    unscoreable: list[tuple[str, list[str]]] = []
+    partial: list[tuple[str, list[str]]] = []
+    seen: dict[str, int] = {}
+    total_ids = bad_ids = resolvable = 0
+
+    for record in records:
+        resolved, unresolved = resolve_relevant(conn, record.relevant_doc_ids)
+        total_ids += len(record.relevant_doc_ids)
+        bad_ids += len(unresolved)
+        for value in record.relevant_doc_ids:
+            seen[value] = seen.get(value, 0) + 1
+        if resolved:
+            resolvable += 1
+            if unresolved:
+                partial.append((record.q, unresolved))
+        else:
+            unscoreable.append((record.q, list(record.relevant_doc_ids)))
+
+    duplicates = sorted(value for value, count in seen.items() if count > 1)
+    return VerifyReport(
+        queries=len(records),
+        resolvable=resolvable,
+        unscoreable=unscoreable,
+        partial=partial,
+        duplicates=duplicates,
+        total_ids=total_ids,
+        bad_ids=bad_ids,
+    )
+
+
 def evaluate(
     conn: sqlite3.Connection,
     records: list[QueryRecord],

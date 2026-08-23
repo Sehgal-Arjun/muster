@@ -26,9 +26,17 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
-# Anything that looks like a code: runs of four or more digits, and long
-# alphanumeric tokens of the kind used for magic-link paths.
-_DIGIT_RUN_RE = re.compile(r"\d{4,}")
+# Anything that looks like a code. Senders format them in groups as often as
+# not — "Supercell ID Login [987 386]" slipped through a plain \d{4,} — so
+# split groups are matched too. Over-masking is cheap here: only the titles of
+# already-redacted documents are touched, and those are unsearchable anyway.
+_DIGIT_RUN_RE = re.compile(
+    r"""(?x)
+    \d{4,}                       # 187431
+  | \b\d{3}[ .\-]\d{3,}\b        # 987 386
+  | \b\d{2}(?:[ .\-]\d{2}){2,}\b  # 12-34-56
+    """
+)
 _TOKEN_RE = re.compile(r"\b(?=\w*\d)(?=\w*[A-Za-z])\w{12,}\b")
 
 REDACTED_MARK = "[redacted]"
