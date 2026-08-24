@@ -34,7 +34,11 @@ def model():
 
 
 @pytest.fixture
-def embedded(conn: sqlite3.Connection, cfg: Config, model) -> sqlite3.Connection:
+def embedded(conn: sqlite3.Connection, cfg: Config, model, home) -> sqlite3.Connection:
+    # Pin the model in config: `search(mode="vector")` resolves it from there,
+    # so without this the test would follow whatever the current default is and
+    # look for vectors nobody embedded.
+    (home / "config.toml").write_text(f'[embed]\nmodel_id = "{MODEL}"\n')
     store = BlobStore(cfg.blob_dir)
     for message in MboxConnector(FIXTURE).fetch():
         ingest_message(

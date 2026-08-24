@@ -18,7 +18,20 @@ CONFIG_FILENAME = "config.toml"
 
 # Kept here rather than in the embedding module so that `muster search` can name
 # the current model without importing sentence-transformers.
-DEFAULT_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+#
+# bge-m3 over bge-small-en-v1.5, decided by measurement on a real 23-query set
+# plus a 30-pair EN/DE probe:
+#
+#   model                  hybrid r@10   hybrid MRR   EN->DE acc@1
+#   bge-small-en-v1.5           0.5652       0.4543          0.233
+#   multilingual-e5-base        0.6087       0.4686          0.900
+#   bge-m3                      0.6522       0.4700          1.000
+#
+# The English gain alone would not obviously be worth 14x the embedding time.
+# The cross-lingual number is what settles it: bge-small cannot see German at
+# all, and German correspondence is coming. Query-time cost is not a factor —
+# m3 loads in 2.6s warm and encodes a query faster than bge-small does.
+DEFAULT_EMBED_MODEL = "BAAI/bge-m3"
 
 
 @dataclass(frozen=True)
