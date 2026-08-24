@@ -45,20 +45,29 @@ class MboxConnector:
     def __init__(self, path: Path, *, source_name: str = "file"):
         self.path = Path(path).expanduser().resolve()
         self.source = source_name
+        self.skipped_known = 0
 
     def _box(self):
         if self.path.is_dir():
             return mailbox.Maildir(str(self.path), factory=None, create=False)
         return mailbox.mbox(str(self.path), factory=None, create=False)
 
-    def fetch(self, query: str | None = None, *, limit: int | None = None) -> Iterator[RawMessage]:
+    def fetch(
+        self,
+        query: str | None = None,
+        *,
+        limit: int | None = None,
+        skip=None,
+    ) -> Iterator[RawMessage]:
         """``query`` is ignored: a local mailbox has no server-side search."""
         if query:
             log.warning("mbox connector ignores query %r", query)
 
         if self.path.is_file() and self.path.suffix.lower() == ".eml":
             raw = self.path.read_bytes()
-            yield RawMessage(source_uid=str(self.path), raw=raw, meta={"path": str(self.path)})
+            uid = str(self.path)
+            if skip is None or not skip(uid):
+                yield RawMessage(source_uid=uid, raw=raw, meta={"path": uid})
             return
 
         box = self._box()
@@ -74,8 +83,12 @@ class MboxConnector:
                     log.error("%s[%s]: unreadable (%s)", self.path, key, exc)
                     continue
 
+                uid = _uid_for(raw)
+                if skip is not None and skip(uid):
+                    self.skipped_known += 1
+                    continue
                 yield RawMessage(
-                    source_uid=_uid_for(raw),
+                    source_uid=uid,
                     raw=raw,
                     meta={"path": str(self.path), "mailbox_key": str(key)},
                 )

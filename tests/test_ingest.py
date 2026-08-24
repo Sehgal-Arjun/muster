@@ -206,3 +206,17 @@ def test_mbox_connector_yields_stable_uids() -> None:
 
 def test_mbox_connector_respects_limit() -> None:
     assert len(list(MboxConnector(FIXTURE).fetch(limit=3))) == 3
+
+
+def test_mbox_connector_honours_skip() -> None:
+    """Every connector needs it, or the protocol is a lie."""
+    from muster.connectors.mbox import MboxConnector
+
+    all_uids = [m.source_uid for m in MboxConnector(FIXTURE).fetch()]
+    known = set(all_uids[:10])
+
+    connector = MboxConnector(FIXTURE)
+    got = [m.source_uid for m in connector.fetch(skip=known.__contains__)]
+
+    assert got == all_uids[10:]
+    assert connector.skipped_known == 10

@@ -7,7 +7,7 @@ downstream, so that Outlook and IMAP inherit every parser fix for free.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -27,6 +27,18 @@ class Connector(Protocol):
 
     source: str  # 'gmail' | 'outlook' | 'imap' | 'file'
 
-    def fetch(self, query: str | None = None, *, limit: int | None = None) -> Iterator[RawMessage]:
-        """Yield messages matching a provider-native query, newest first."""
+    def fetch(
+        self,
+        query: str | None = None,
+        *,
+        limit: int | None = None,
+        skip: Callable[[str], bool] | None = None,
+    ) -> Iterator[RawMessage]:
+        """Yield messages matching a provider-native query, newest first.
+
+        ``skip`` is consulted with each candidate ``source_uid`` *before* the
+        message body is fetched. Providers list ids cheaply and in bulk but
+        charge a round trip per body, so a re-sync that already holds most of
+        the mailbox should pay for the listing and nothing else.
+        """
         ...

@@ -229,11 +229,24 @@ def _drain(
     redactor = Redactor(cfg.redaction)
     sender_filter = SenderFilter(cfg.excluded_senders)
 
+    # Every uid already held for this source, so the connector can decline to
+    # fetch them. Listing ids is one request per 500; fetching a body is one
+    # request each, so re-syncing a mailbox we mostly hold should cost the
+    # listing and nothing more.
+    known = {
+        row[0]
+        for row in conn.execute(
+            "SELECT source_uid FROM docs WHERE source = ?", (connector.source,)
+        )
+    }
+    if known:
+        typer.echo(f"{len(known)} messages already indexed; they will not be fetched")
+
     def on_page(total: int, pages: int, more: bool) -> None:
         tail = "" if more else " (complete)"
         typer.echo(f"\rlisting: {total} message ids over {pages} pages{tail}", nl=not more)
 
-    fetch_kwargs = {"limit": limit}
+    fetch_kwargs = {"limit": limit, "skip": known.__contains__}
     if "on_page" in inspect.signature(connector.fetch).parameters:
         fetch_kwargs["on_page"] = on_page
 
@@ -288,9 +301,11 @@ def _drain(
     # reported separately rather than being invisible in the arithmetic below.
     listed = getattr(connector, "listed", seen)
     dropped = list(getattr(connector, "dropped", []))
+    known_skipped = getattr(connector, "skipped_known", 0)
 
     typer.echo(
         f"\n{listed} listed by source"
+        f"\n  {known_skipped} already indexed (not fetched)"
         f"\n  {len(dropped)} unfetchable (dropped before parsing)"
         f"\n  {filtered} filtered by category"
         f"\n  {dropped_by_rule} dropped by a redaction rule"
@@ -303,7 +318,8 @@ def _drain(
     if redacted:
         typer.echo(f"  {redacted} redacted (credentials kept out of the index)")
     if listed != (
-        len(dropped) + filtered + by_sender + dropped_by_rule + created + skipped + failed
+        known_skipped + len(dropped) + filtered + by_sender
+        + dropped_by_rule + created + skipped + failed
     ):
         typer.echo(
             typer.style("  warning: counters do not reconcile", fg="yellow"), err=True

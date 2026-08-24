@@ -103,6 +103,9 @@ class GmailConnector:
         # summary entirely and look like it was never there.
         self.listed = 0
         self.dropped: list[tuple[str, str]] = []
+        # Ids the caller already holds. Counted rather than fetched: this is
+        # the difference between a re-sync taking minutes and taking hours.
+        self.skipped_known = 0
 
     @property
     def service(self):
@@ -149,14 +152,27 @@ class GmailConnector:
                 return
 
     def fetch(
-        self, query: str | None = None, *, limit: int | None = None, on_page=None
+        self,
+        query: str | None = None,
+        *,
+        limit: int | None = None,
+        skip=None,
+        on_page=None,
     ) -> Iterator[RawMessage]:
         query = query or DEFAULT_QUERY
         self.listed = 0
         self.dropped = []
+        self.skipped_known = 0
         messages = self.service.users().messages()
 
-        for message_id in self.list_ids(query, limit, on_page=on_page):
+        # The limit counts messages actually yielded, not ids listed. Listing
+        # is one request per 500 ids; fetching is one per message. Capping the
+        # listing would mean `--limit 20` on a known mailbox fetching nothing.
+        yielded = 0
+        for message_id in self.list_ids(query, None, on_page=on_page):
+            if skip is not None and skip(message_id):
+                self.skipped_known += 1
+                continue
             try:
                 payload = _retrying(
                     lambda mid=message_id: messages.get(
@@ -183,7 +199,12 @@ class GmailConnector:
                     "thread_uid": payload.get("threadId"),
                     "labels": payload.get("labelIds", []),
                     "internal_date": payload.get("internalDate"),
+                    # Kept per message so a future incremental sync can resume
+                    # from the highest one seen, instead of listing at all.
                     "history_id": payload.get("historyId"),
                     "size_estimate": payload.get("sizeEstimate"),
                 },
             )
+            yielded += 1
+            if limit is not None and yielded >= limit:
+                return

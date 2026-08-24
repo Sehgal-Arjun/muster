@@ -196,6 +196,31 @@ muster search "..." --mode keyword | vector | hybrid
 All three stay available so they remain comparable under `muster eval`; a mode
 that cannot be measured against the others is a mode nobody can reason about.
 
+### Why hybrid, in one query
+
+```
+muster search "thing i left on the plane"
+  -> Lost jacket in YYZ->LGA flight (PD603 @ 7:15am today)
+```
+
+| arm | rank |
+|---|---|
+| keyword | **no results at all** |
+| vector | **1** |
+| hybrid | **1** |
+
+The query shares no word with the subject or the body. BM25 has nothing to
+match on and correctly returns nothing rather than guessing; the embedding
+places "thing i left on the plane" next to "lost jacket in flight" because that
+is what the sentence means. This is the case the whole vector arm exists for,
+and it is invisible in any eval set whose queries were written by reading the
+messages — the words leak in.
+
+The converse is just as sharp. Searching the confirmation code `MXUFEM` is a
+query BM25 answers exactly and vectors cannot answer at all: the token is not
+in the embedding model's vocabulary, so the vector arm returns confident-looking
+noise. Neither arm is reliably better; the fusion is the product.
+
 ### Confidence floor
 
 Ten confident-looking wrong answers are worse than none, so results that only

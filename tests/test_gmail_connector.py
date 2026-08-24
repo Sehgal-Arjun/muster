@@ -144,3 +144,57 @@ def test_missing_credentials_raises_actionable_error(tmp_path) -> None:
     connector = GmailConnector(tmp_path / "nope.json", tmp_path / "token.json")
     with pytest.raises(GmailAuthError, match="OAuth client secret"):
         _ = connector.service
+
+
+# --- not re-fetching what we already hold ---------------------------------
+
+
+def test_known_ids_are_never_fetched(connector_factory) -> None:
+    """The whole point: listing is bulk, fetching is one round trip each."""
+    messages = {f"m{i}": _payload(f"m{i}", b"x") for i in range(6)}
+    connector = connector_factory(messages)
+    known = {"m0", "m1", "m2", "m4"}
+
+    got = list(connector.fetch("q", skip=known.__contains__))
+
+    assert [m.source_uid for m in got] == ["m3", "m5"]
+    assert connector.service.messages().get_calls == ["m3", "m5"], "no wasted fetches"
+    assert connector.skipped_known == 4
+
+
+def test_a_fully_known_mailbox_costs_only_the_listing(connector_factory) -> None:
+    messages = {f"m{i}": _payload(f"m{i}", b"x") for i in range(10)}
+    connector = connector_factory(messages)
+
+    assert list(connector.fetch("q", skip=lambda _uid: True)) == []
+    assert connector.service.messages().get_calls == []
+    assert connector.listed == 10, "still listed, just not fetched"
+    assert connector.skipped_known == 10
+
+
+def test_limit_counts_messages_yielded_not_ids_listed(connector_factory) -> None:
+    """Otherwise --limit 2 on a mostly-known mailbox fetches nothing at all."""
+    messages = {f"m{i}": _payload(f"m{i}", b"x") for i in range(10)}
+    connector = connector_factory(messages)
+    known = {f"m{i}" for i in range(6)}
+
+    got = list(connector.fetch("q", limit=2, skip=known.__contains__))
+
+    assert [m.source_uid for m in got] == ["m6", "m7"]
+    assert connector.service.messages().get_calls == ["m6", "m7"]
+
+
+def test_skip_is_optional(connector_factory) -> None:
+    messages = {f"m{i}": _payload(f"m{i}", b"x") for i in range(3)}
+    connector = connector_factory(messages)
+    assert len(list(connector.fetch("q"))) == 3
+    assert connector.skipped_known == 0
+
+
+def test_counters_reset_between_runs(connector_factory) -> None:
+    messages = {f"m{i}": _payload(f"m{i}", b"x") for i in range(4)}
+    connector = connector_factory(messages)
+    list(connector.fetch("q", skip=lambda _uid: True))
+    assert connector.skipped_known == 4
+    list(connector.fetch("q"))
+    assert connector.skipped_known == 0
