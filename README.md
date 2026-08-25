@@ -261,25 +261,24 @@ Switching models inserts alongside the old vectors rather than replacing them.
 
 ### Where it stands
 
-Fixture corpus `c0d32bf34acd4319` (16 docs), 5 seed queries, k=10:
+Corpus `81af6e3cf91dc885` — 8,038 documents spanning 2023-08 to 2026-08, 31
+hand-written queries, k=10, `bge-m3`:
 
 | mode | recall@10 | MRR |
 |---|---|---|
-| keyword | 0.8000 | 0.8000 |
-| vector | **1.0000** | **0.8333** |
-| hybrid | 0.8000 | 0.8000 |
+| keyword | 0.3871 | 0.3003 |
+| vector | 0.4839 | 0.3563 |
+| **hybrid** | **0.6774** | **0.4936** |
 
-Do not read much into this. Five queries over sixteen documents measures
-almost nothing, and hybrid is being punished by an artefact of the tiny corpus:
-the one query keyword misses is answered by the vector arm at rank 6, and with
-only sixteen documents the keyword arm's confident noise outranks it in the
-fusion. Tuning the RRF constant against five queries would be overfitting.
-The number that matters is the one after `eval/queries.jsonl` is filled in.
+Hybrid beats the better arm by 40% on recall. That gap is the whole argument
+for keeping both: neither arm is reliably ahead, they fail on different
+queries, and fusing them recovers documents that neither finds alone.
 
-**Always compare runs with the same corpus fingerprint.** The same five queries
-over a real 831-document index score 0.8000/0.8000 in every mode — not a
-regression, just a harder corpus. Comparing across fingerprints measures the
-mailbox, not the retrieval.
+**Only compare runs with the same corpus fingerprint.** Every earlier number in
+this project's history was measured on a smaller corpus or a smaller query set,
+and is not comparable to these. Growing the archive makes retrieval harder —
+more documents to be wrong about — so a falling number can mean the index got
+bigger rather than worse. The fingerprint is what tells the two apart.
 
 ## Configuration
 
