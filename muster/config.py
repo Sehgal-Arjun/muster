@@ -64,6 +64,9 @@ class SearchConfig:
 
     title_weight: float = 1.0
     text_weight: float = 1.0
+    # Sender display name and addresses. Some correspondents appear in the
+    # archive only here — the From line is the sole copy of their name.
+    party_weight: float = 1.0
     # Applied to each arm's native score. Below this, a result is noise, and
     # ten confident-looking wrong answers are worse than none.
     # BM25 per discriminating clause at a 1000-chunk index, scaled to the real
@@ -186,6 +189,7 @@ def load_config(home: Path | None = None) -> Config:
         ),
         search=SearchConfig(
             title_weight=float(search.get("title_weight", 1.0)),
+            party_weight=float(search.get("party_weight", 1.0)),
             text_weight=float(search.get("text_weight", 1.0)),
             min_score_keyword=float(search.get("min_score_keyword", 4.0)),
             min_score_vector=float(search.get("min_score_vector", 0.45)),

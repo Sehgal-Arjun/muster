@@ -34,6 +34,7 @@ from muster.ingest import (
     _text_hash,
     attachment_plan,
     build_chunks,
+    party_text,
 )
 from muster.parser import parse_message
 
@@ -161,7 +162,8 @@ def _new_signature(parsed, new_chunks: list[str], plan) -> tuple:
 
 
 _DOC_FIELDS = (
-    "title", "doc_date", "date_source", "counterparty", "thread_uid", "category", "sender",
+    "title", "doc_date", "date_source", "counterparty", "thread_uid", "category",
+    "sender", "sender_name",
 )
 
 
@@ -217,6 +219,7 @@ def reparse_doc(
         "thread_uid": parsed.thread_uid,
         "category": category_of(parsed.headers.get("labels")),
         "sender": (parsed.headers.get("from") or [None])[0],
+        "sender_name": (parsed.headers.get("from_names") or [None])[0],
     }
 
     # A message with no usable timestamp anywhere was stamped with the time it
@@ -226,12 +229,27 @@ def reparse_doc(
     if new_fields["date_source"] == "ingest" and current["date_source"] == "ingest":
         new_fields["doc_date"] = current["doc_date"]
 
+    # The party column is denormalised onto chunks, so it can go stale without
+    # the chunk text changing at all — which is exactly what happens the first
+    # time display names are captured. Syncing it is one cheap UPDATE and the
+    # FTS triggers pick it up.
+    party = party_text(parsed)
+    stale_party = conn.execute(
+        "SELECT count(*) FROM chunks WHERE doc_id = ? AND coalesce(party, '') != ?",
+        (doc_id, party),
+    ).fetchone()[0]
+    if stale_party:
+        conn.execute("UPDATE chunks SET party = ? WHERE doc_id = ?", (party, doc_id))
+
     if not content_changed:
         # Metadata can still move without the text changing — a category
         # backfill after migration 002, say. Update the row and leave the
         # chunks, and therefore the vectors, entirely alone.
-        if all(current[field] == new_fields[field] for field in _DOC_FIELDS):
+        unchanged_fields = all(current[field] == new_fields[field] for field in _DOC_FIELDS)
+        if unchanged_fields and not stale_party:
             return False, len(old_parent), len(old_parent), 0
+        if unchanged_fields:
+            return True, len(old_parent), len(old_parent), 0
         conn.execute(
             f"UPDATE docs SET {', '.join(f'{f} = :{f}' for f in _DOC_FIELDS)} WHERE id = :id",
             {**new_fields, "id": doc_id},
@@ -266,7 +284,7 @@ def reparse_doc(
                 "id": doc_id,
             },
         )
-        _insert_chunks(conn, doc_id, new_chunks, parsed.title)
+        _insert_chunks(conn, doc_id, new_chunks, parsed.title, party)
         _rebuild_attachments(conn, store, doc_id, parsed, plan, row["source"])
 
         rebuilt = [doc_id, *_child_doc_ids(conn, doc_id)]

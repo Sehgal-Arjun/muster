@@ -63,20 +63,42 @@ def existing_doc_id(conn: sqlite3.Connection, source: str, source_uid: str) -> i
 
 
 def _insert_chunks(
-    conn: sqlite3.Connection, doc_id: int, texts: list[str], title: str | None = None
+    conn: sqlite3.Connection,
+    doc_id: int,
+    texts: list[str],
+    title: str | None = None,
+    party: str | None = None,
 ) -> int:
-    """Insert chunks. The title is denormalised onto every row for FTS column 1."""
+    """Insert chunks. Title and party are denormalised onto every row for FTS."""
     rows = [
-        (doc_id, ord_, text, _text_hash(text), title)
+        (doc_id, ord_, text, _text_hash(text), title, party)
         for ord_, text in enumerate(texts)
     ]
     if rows:
         conn.executemany(
-            "INSERT INTO chunks (doc_id, ord, text, text_hash, title)"
-            " VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO chunks (doc_id, ord, text, text_hash, title, party)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
             rows,
         )
     return len(rows)
+
+
+def party_text(parsed: ParsedMessage) -> str:
+    """The people on a message, as one searchable string.
+
+    Display names first because that is what someone types; addresses after,
+    for the queries where the useful token is a domain.
+    """
+    parts: list[str] = []
+    for value in (
+        *(parsed.headers.get("from_names") or []),
+        *(parsed.headers.get("from") or []),
+        parsed.counterparty,
+    ):
+        value = (value or "").strip()
+        if value and value not in parts:
+            parts.append(value)
+    return " ".join(parts)
 
 
 def build_chunks(parsed: ParsedMessage) -> list[str]:
@@ -173,7 +195,7 @@ def ingest_message(
             parsed=parsed,
             meta_extra={"body_mime": parsed.mime, "warnings": parsed.warnings, **meta},
         )
-        n_chunks = _insert_chunks(conn, doc_id, body_chunks, parsed.title)
+        n_chunks = _insert_chunks(conn, doc_id, body_chunks, parsed.title, party_text(parsed))
         attachment_docs = _ingest_attachments(conn, store, doc_id, parsed, source)
 
     return IngestResult(
@@ -203,8 +225,8 @@ def _insert_doc(
         INSERT INTO docs (
             source, source_uid, origin, content_hash, blob_path, mime, title,
             doc_date, date_source, counterparty, thread_uid, meta_json,
-            category, sender, ingested_at
-        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            category, sender, sender_name, ingested_at
+        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source,
@@ -220,6 +242,7 @@ def _insert_doc(
             json.dumps({**parsed.headers, **meta_extra}, default=str),
             category_of(parsed.headers.get("labels")),
             (parsed.headers.get("from") or [None])[0],
+            (parsed.headers.get("from_names") or [None])[0],
             _now(),
         ),
     )
@@ -310,8 +333,8 @@ def _insert_attachment_doc(
         INSERT INTO docs (
             source, source_uid, origin, content_hash, blob_path, mime, title,
             doc_date, date_source, counterparty, thread_uid, meta_json,
-            category, sender, ingested_at
-        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            category, sender, sender_name, ingested_at
+        ) VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source,
@@ -334,9 +357,12 @@ def _insert_attachment_doc(
             ),
             category_of(parent.headers.get("labels")),
             (parent.headers.get("from") or [None])[0],
+            (parent.headers.get("from_names") or [None])[0],
             _now(),
         ),
     )
     child_id = int(cursor.lastrowid)
-    _insert_chunks(conn, child_id, chunks, attachment.filename or parent.title)
+    _insert_chunks(
+        conn, child_id, chunks, attachment.filename or parent.title, party_text(parent)
+    )
     return child_id

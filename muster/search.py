@@ -127,7 +127,7 @@ def keyword_search(
         SELECT c.id                                        AS chunk_id,
                c.doc_id                                    AS doc_id,
                d.title, d.source, d.source_uid, d.doc_date, d.counterparty,
-               bm25(chunks_fts, :wtext, :wtitle)           AS score,
+               bm25(chunks_fts, :wtext, :wtitle, :wparty)  AS score,
                snippet(chunks_fts, 0, '[', ']', ' … ', 18) AS snippet
         FROM chunks_fts
         JOIN chunks c ON c.id = chunks_fts.rowid
@@ -142,6 +142,7 @@ def keyword_search(
         "n": max(limit, 1) * CANDIDATE_FACTOR,
         "wtext": weights[0],
         "wtitle": weights[1],
+        "wparty": weights[2],
     }
     # bm25() is negative, most relevant first.
     sql += " ORDER BY score ASC LIMIT :n"
@@ -159,11 +160,11 @@ def keyword_search(
     return _collapse_to_docs(rows, limit, floor, _ratio_floor() if min_score is None else 0.0)
 
 
-def _weights() -> tuple[float, float]:
+def _weights() -> tuple[float, float, float]:
     from muster.config import load_config
 
     cfg = load_config().search
-    return cfg.text_weight, cfg.title_weight
+    return cfg.text_weight, cfg.title_weight, cfg.party_weight
 
 
 def _floor(mode: str) -> float:

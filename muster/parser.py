@@ -119,6 +119,29 @@ def _addresses(msg: Message, name: str) -> list[str]:
         return []
 
 
+def _display_names(msg: Message, name: str) -> list[str]:
+    """The human-readable part of an address header.
+
+    "Mira Halvorsen <m.halvorsen@university.example>" carries the only copy of that
+    name in the whole archive; the address tokenises as one word and never
+    matches the two-word query someone would type.
+    """
+    raw = _header(msg, name)
+    if not raw:
+        return []
+    try:
+        pairs = email.utils.getaddresses([raw])
+    except Exception:
+        return []
+    out: list[str] = []
+    for display, address in pairs:
+        display = (display or "").strip().strip("\"'")
+        # A display name that just repeats the address adds nothing.
+        if display and display.lower() != (address or "").lower():
+            out.append(display)
+    return out
+
+
 def resolve_date(
     msg: Message, meta: dict[str, Any], warnings: list[str]
 ) -> tuple[str, str]:
@@ -369,6 +392,7 @@ def parse_message(
 
     subject = _header(msg, "Subject") or NO_SUBJECT
     from_addrs = _addresses(msg, "From")
+    from_names = _display_names(msg, "From")
     to_addrs = _addresses(msg, "To")
     cc_addrs = _addresses(msg, "Cc")
     labels = list(meta.get("labels") or [])
@@ -408,6 +432,7 @@ def parse_message(
         attachments=attachments,
         headers={
             "from": from_addrs,
+            "from_names": from_names,
             "to": to_addrs,
             "cc": cc_addrs,
             "subject": subject,

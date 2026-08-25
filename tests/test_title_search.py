@@ -40,9 +40,11 @@ def indexed(conn: sqlite3.Connection, cfg) -> sqlite3.Connection:
     return conn
 
 
-def test_the_title_is_indexed_as_its_own_column(conn) -> None:
+def test_the_fts_columns_are_in_the_order_bm25_expects(conn) -> None:
+    """Order is load-bearing: bm25() takes weights positionally and
+    snippet(chunks_fts, 0, ...) must keep pointing at the body."""
     columns = [row[1] for row in conn.execute("PRAGMA table_info(chunks_fts)")]
-    assert columns == ["text", "title"], "bm25(chunks_fts, 1.0, 3.0) reads in this order"
+    assert columns == ["text", "title", "party"]
 
 
 def test_every_chunk_carries_its_document_title(indexed) -> None:
