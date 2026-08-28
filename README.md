@@ -184,8 +184,9 @@ muster search "warehouse lease renewal" --limit 10 --since 2026-01-01
 muster search "..." --mode keyword | vector | hybrid
 ```
 
-- **keyword** — BM25 over FTS5, with the subject indexed as its own column at
-  weight 3.0. Terms are OR-ed, and a punctuated term contributes both its
+- **keyword** — BM25 over FTS5, with the subject and the sender's display name
+  indexed as their own weighted columns, and dates read out of the query and
+  applied as a `doc_date` filter. Terms are OR-ed, and a punctuated term contributes both its
   phrase and its parts, so `Rechnung_2026-0042.pdf` finds the covering email
   *and* the invoice.
 - **vector** — `bge-small-en-v1.5` via sqlite-vec cosine distance. Needs
@@ -266,9 +267,9 @@ hand-written queries, k=10, `bge-m3`:
 
 | mode | recall@10 | MRR |
 |---|---|---|
-| keyword | 0.3871 | 0.3003 |
+| keyword | 0.4516 | 0.3363 |
 | vector | 0.4839 | 0.3563 |
-| **hybrid** | **0.6774** | **0.4936** |
+| **hybrid** | **0.7097** | **0.4801** |
 
 Hybrid beats the better arm by 40% on recall. That gap is the whole argument
 for keeping both: neither arm is reliably ahead, they fail on different

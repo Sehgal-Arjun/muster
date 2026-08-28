@@ -18,6 +18,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from muster.categories import DEFAULT_EXCLUDED
+from muster.temporal import apply as apply_temporal
 
 DEFAULT_LIMIT = 10
 # Chunks to consider before collapsing to documents. A long document can hold
@@ -118,7 +119,10 @@ def keyword_search(
     source: str | None = None,
     exclude_categories=DEFAULT_EXCLUDED,
     min_score: float | None = None,
+    temporal: bool = True,
 ) -> list[Hit]:
+    if temporal:
+        query, since, until, _span = apply_temporal(query, since, until)
     match = build_match_query(query)
     if not match:
         return []
@@ -313,14 +317,24 @@ def vector_search(
     source: str | None = None,
     exclude_categories=DEFAULT_EXCLUDED,
     min_score: float | None = None,
+    temporal: bool = False,
 ) -> list[Hit]:
-    """Nearest neighbours by cosine distance, using sqlite-vec on the vectors table."""
+    """Nearest neighbours by cosine distance, using sqlite-vec on the vectors table.
+
+    Temporal parsing is off here and on in the keyword arm, which is what
+    measurement supports. Stripping "june 2025" out of "docusign confirmation
+    june 2025" leaves a weaker sentence to embed, and narrowing the candidate
+    set removes neighbours the arm would otherwise have surfaced: applied to
+    both arms it cost hybrid MRR 0.4801 -> 0.4581 while adding no recall.
+    """
     from muster.config import load_config
     from muster.db import load_sqlite_vec
     from muster.embed import encode_query, load_model, pack
 
     if not (query or "").strip():
         return []
+    if temporal:
+        query, since, until, _span = apply_temporal(query, since, until)
 
     cfg = load_config()
     model_id = model_id or cfg.embed.model_id
@@ -459,6 +473,7 @@ def hybrid_search(
     carry that information, so that is where the question gets asked.
     """
     depth = max(limit, 1) * FUSION_DEPTH
+    # The date is read by the keyword arm only; see vector_search's docstring.
     keyword = keyword_search(conn, query, limit=depth, min_score=min_score, **filters)
     try:
         vector = vector_search(conn, query, limit=depth, min_score=min_score, **filters)
