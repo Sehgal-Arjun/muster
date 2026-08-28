@@ -533,8 +533,9 @@ def search(
 
     for rank, hit in enumerate(hits, start=1):
         title = hit.title or "(no title)"
+        copies = f"  (x{hit.duplicates} identical copies)" if hit.duplicates > 1 else ""
         typer.echo(
-            f"{rank:>2}. {typer.style(title[:72], bold=True)}"
+            f"{rank:>2}. {typer.style(title[:72], bold=True)}{copies}"
             f"\n    {hit.doc_date[:10]}  {hit.source}  {hit.counterparty or '-'}"
             f"  score {hit.score:.3f}  doc {hit.doc_id}"
             f"\n    {hit.snippet}"

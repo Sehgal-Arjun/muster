@@ -87,6 +87,9 @@ class SearchConfig:
     # only decides ties, and it decides them toward exact lexical evidence.
     rrf_keyword_weight: float = 1.0
     rrf_vector_weight: float = 0.9
+    # Collapse results that are byte-identical. Four copies of one PDF held
+    # ranks 1-4 of a ten-result list before this.
+    dedupe_by_content: bool = True
 
 
 # Automated senders whose volume drowns real correspondence. Gmail files GitHub
@@ -197,6 +200,7 @@ def load_config(home: Path | None = None) -> Config:
             min_score_ratio=float(search.get("min_score_ratio", 0.25)),
             rrf_keyword_weight=float(search.get("rrf_keyword_weight", 1.0)),
             rrf_vector_weight=float(search.get("rrf_vector_weight", 0.9)),
+            dedupe_by_content=bool(search.get("dedupe_by_content", True)),
         ),
         redaction=_redaction_config(redaction),
         excluded_senders=tuple(

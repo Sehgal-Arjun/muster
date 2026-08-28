@@ -45,6 +45,7 @@ def span(query: str) -> tuple[str, str, str] | None:
         ("notes this year", "notes", "2026-01-01", "2026-12-31"),
         ("statement last year", "statement", "2025-01-01", "2025-12-31"),
         ("photos summer 2024", "photos", "2024-06-01", "2024-08-31"),
+        ("trip last summer", "trip", "2025-06-01", "2025-08-31"),
         ("bills sept 2025", "bills", "2025-09-01", "2025-09-30"),
     ],
 )
@@ -52,12 +53,19 @@ def test_expressions_parse(query, remainder, since, until) -> None:
     assert span(query) == (remainder, since, until)
 
 
-def test_a_bare_month_resolves_backwards() -> None:
-    """Someone asking an archive about a month means one that has happened."""
+def test_a_bare_month_is_not_a_date() -> None:
+    """"voiceflow september" means an offer mentioning September, not mail
+    sent in September — and filtering by date removes the answer."""
+    assert span("voiceflow september") is None
+    assert span("photos spring") is None
+
+
+def test_a_qualified_month_resolves_backwards() -> None:
+    """With a qualifier the intent is explicit, and the year is inferred."""
     # August, in August: this year.
-    assert span("photos august")[1].startswith("2026-08")
+    assert span("photos early august")[1].startswith("2026-08")
     # December, in August: last year, not four months from now.
-    assert span("photos december")[1].startswith("2025-12")
+    assert span("photos late december")[1].startswith("2025-12")
 
 
 def test_winter_straddles_the_year_boundary() -> None:
@@ -84,6 +92,11 @@ def test_only_the_first_expression_is_used() -> None:
 
 def test_an_impossible_date_is_ignored_not_fatal() -> None:
     assert extract("meeting february 2025", today=TODAY) is not None
+
+
+def test_a_month_alone_leaves_the_query_whole() -> None:
+    text, found = extract("voiceflow september", today=TODAY)
+    assert (text, found) == ("voiceflow september", None)
 
 
 # --- folding into filters -------------------------------------------------

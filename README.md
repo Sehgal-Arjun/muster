@@ -189,10 +189,14 @@ muster search "..." --mode keyword | vector | hybrid
   applied as a `doc_date` filter. Terms are OR-ed, and a punctuated term contributes both its
   phrase and its parts, so `Rechnung_2026-0042.pdf` finds the covering email
   *and* the invoice.
-- **vector** — `bge-small-en-v1.5` via sqlite-vec cosine distance. Needs
-  `muster embed` first.
+- **vector** — `bge-m3` via sqlite-vec cosine distance. Needs `muster embed`
+  first.
 - **hybrid** — both arms fused with Reciprocal Rank Fusion at k=60. Falls back
   to keyword alone when nothing is embedded.
+
+Results are collapsed by content hash: identical bytes are one document however
+many messages carried them, and four copies of one PDF were taking four of the
+top five slots.
 
 All three stay available so they remain comparable under `muster eval`; a mode
 that cannot be measured against the others is a mode nobody can reason about.
@@ -267,9 +271,9 @@ hand-written queries, k=10, `bge-m3`:
 
 | mode | recall@10 | MRR |
 |---|---|---|
-| keyword | 0.4516 | 0.3363 |
-| vector | 0.4839 | 0.3563 |
-| **hybrid** | **0.7097** | **0.4801** |
+| keyword | 0.4839 | 0.3694 |
+| vector | 0.5161 | 0.3893 |
+| **hybrid** | **0.7419** | **0.5148** |
 
 Hybrid beats the better arm by 40% on recall. That gap is the whole argument
 for keeping both: neither arm is reliably ahead, they fail on different

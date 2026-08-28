@@ -10,9 +10,14 @@ So a temporal expression is removed from the text query and applied as a
 ``doc_date`` range instead. The remaining words do the ranking; the date does
 the narrowing.
 
-Bare months resolve backwards. "early august" in October means this year's
-August; in March it means last year's. People asking an archive about a month
-mean the one that has already happened.
+A month needs a qualifier or a year to count as a date. "early august" and
+"september 2024" are unambiguous; a bare "september" is more often part of what
+the message says than a statement about when it was sent, and reading it as a
+filter removes the very document being looked for.
+
+Where a month is taken as a date but the year is not given, it resolves
+backwards: "early august" in October means this year's August, in March last
+year's. People asking an archive about a month mean one that has happened.
 """
 
 from __future__ import annotations
@@ -59,11 +64,15 @@ _PATTERNS: list[tuple[str, str]] = [
     ("this_month", r"\bthis\s+month\b"),
     ("last_year", r"\blast\s+year\b"),
     ("this_year", r"\bthis\s+year\b"),
-    ("season", rf"\b(?P<season>{_SEASON_ALT})\b"),
-    ("month", rf"\b(?P<month>{_MONTH_ALT})\b"),
     # A bare year, but not one glued to other digits (invoice 20241234).
     ("year", r"(?<![\d-])(?P<year>19\d{2}|20\d{2})(?![\d-])"),
 ]
+
+# Deliberately absent: a bare month or season on its own. "voiceflow september"
+# usually means an offer that mentions September, not mail sent in September,
+# and reading it as a date filters the answer out entirely. Measured on the
+# query set it changed nothing either way, so the failure mode decides it. A
+# qualifier ("early august") or a year ("september 2024") is explicit enough.
 _COMPILED = [(name, re.compile(pattern, re.IGNORECASE)) for name, pattern in _PATTERNS]
 
 

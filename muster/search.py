@@ -58,6 +58,11 @@ class Hit:
     counterparty: str | None
     score: float
     snippet: str
+    content_hash: str | None = None
+    # How many identical copies this hit stands for. One offer-letter PDF in a
+    # real archive was attached to four messages under three filenames and took
+    # four of the top five slots on its own.
+    duplicates: int = 1
 
     @property
     def rank_key(self) -> float:
@@ -131,6 +136,7 @@ def keyword_search(
         SELECT c.id                                        AS chunk_id,
                c.doc_id                                    AS doc_id,
                d.title, d.source, d.source_uid, d.doc_date, d.counterparty,
+               d.content_hash                              AS content_hash,
                bm25(chunks_fts, :wtext, :wtitle, :wparty)  AS score,
                snippet(chunks_fts, 0, '[', ']', ' … ', 18) AS snippet
         FROM chunks_fts
@@ -240,6 +246,31 @@ def _scaled_keyword_floor(
     return configured * (math.log1p(n) / math.log1p(REFERENCE_CHUNKS)) * clauses
 
 
+def collapse_duplicates(hits: list[Hit]) -> list[Hit]:
+    """One hit per distinct file, keeping the best-scoring copy.
+
+    Identical bytes are the same document however many messages carried them.
+    Leaving the copies in spends result slots on repetition: four copies of one
+    PDF held ranks one to four of a ten-result list, so six of the ten slots
+    were doing the work of nine.
+    """
+    from muster.config import load_config
+
+    if not load_config().search.dedupe_by_content:
+        return hits
+
+    best: dict[str, Hit] = {}
+    order: list[str] = []
+    for hit in hits:
+        key = hit.content_hash or f"doc:{hit.doc_id}"
+        if key not in best:
+            best[key] = hit
+            order.append(key)
+        else:
+            best[key].duplicates += 1
+    return [best[key] for key in order]
+
+
 def _collapse_to_docs(
     rows, limit: int, floor: float = 0.0, ratio: float = 0.0
 ) -> list[Hit]:
@@ -256,6 +287,7 @@ def _collapse_to_docs(
             counterparty=row["counterparty"],
             score=-float(row["score"]),
             snippet=" ".join((row["snippet"] or "").split()),
+            content_hash=row["content_hash"],
         )
         current = best.get(hit.doc_id)
         if current is None or hit.score > current.score:
@@ -270,7 +302,8 @@ def _collapse_to_docs(
         # answer, whatever the absolute numbers happen to be.
         cutoff = ranked[0].score * ratio
         ranked = [hit for hit in ranked if hit.score >= cutoff]
-    return ranked[:limit]
+    # Deduplicate after ranking so the surviving copy is the best-scoring one.
+    return collapse_duplicates(ranked)[:limit]
 
 
 def _filter_clause(
@@ -359,6 +392,7 @@ def vector_search(
         SELECT c.id     AS chunk_id,
                c.doc_id AS doc_id,
                d.title, d.source, d.source_uid, d.doc_date, d.counterparty,
+               d.content_hash         AS content_hash,
                substr(c.text, 1, 220) AS snippet,
                vec_distance_cosine(v.embedding, :embedding) AS distance
         FROM vectors v
@@ -384,6 +418,7 @@ def vector_search(
             counterparty=row["counterparty"],
             score=1.0 - float(row["distance"]),
             snippet=" ".join((row["snippet"] or "").split()),
+            content_hash=row["content_hash"],
         )
         for row in rows
     ]
@@ -395,7 +430,8 @@ def vector_search(
             continue
         if hit.doc_id not in best or hit.score > best[hit.doc_id].score:
             best[hit.doc_id] = hit
-    return sorted(best.values(), key=lambda h: (-h.score, h.doc_date))[:limit]
+    ranked = sorted(best.values(), key=lambda h: (-h.score, h.doc_date))
+    return collapse_duplicates(ranked)[:limit]
 
 
 def reciprocal_rank_fusion(
@@ -447,9 +483,10 @@ def reciprocal_rank_fusion(
                 counterparty=hit.counterparty,
                 score=score,
                 snippet=hit.snippet,
+                content_hash=hit.content_hash,
             )
         )
-    return sorted(fused, key=lambda h: (-h.score, h.doc_date))[:limit]
+    return collapse_duplicates(sorted(fused, key=lambda h: (-h.score, h.doc_date)))[:limit]
 
 
 def hybrid_search(

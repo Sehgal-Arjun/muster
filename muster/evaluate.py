@@ -175,41 +175,54 @@ def load_queries(path: Path) -> list[QueryRecord]:
 KNOWN_SOURCES = ("gmail", "file", "outlook", "imap")
 
 
-def _lookup(conn: sqlite3.Connection, value: str) -> list[int]:
-    """Every doc a query-file identifier could mean."""
+def _lookup(conn: sqlite3.Connection, value: str) -> tuple[list[int], bool]:
+    """(matching doc ids, whether several matches are expected).
+
+    A content hash naming several documents is not ambiguity: identical bytes
+    are the same document, stored more than once. One offer-letter PDF in this
+    archive is attached to four messages under three filenames. A source_uid
+    matching twice, by contrast, is a broken query file.
+    """
     if value.startswith("sha256:"):
         rows = conn.execute(
             "SELECT id FROM docs WHERE content_hash = ?", (value[len("sha256:") :],)
         ).fetchall()
-        return [int(r[0]) for r in rows]
+        return [int(r[0]) for r in rows], True
 
     source, _, uid = value.partition(":")
     if uid and source in KNOWN_SOURCES:
         rows = conn.execute(
             "SELECT id FROM docs WHERE source = ? AND source_uid = ?", (source, uid)
         ).fetchall()
-        return [int(r[0]) for r in rows]
+        return [int(r[0]) for r in rows], False
 
     rows = conn.execute("SELECT id FROM docs WHERE source_uid = ?", (value,)).fetchall()
-    return [int(r[0]) for r in rows]
+    return [int(r[0]) for r in rows], False
 
 
 def resolve_relevant(
     conn: sqlite3.Connection, ids: list[str]
-) -> tuple[list[int], list[str]]:
-    """Map identifiers to live doc ids, reporting the ones that do not resolve."""
-    resolved: list[int] = []
+) -> tuple[list[list[int]], list[str]]:
+    """Map identifiers to groups of doc ids, one group per label.
+
+    A group is satisfied by retrieving *any* of its members, which is what makes
+    a content-hash label behave sensibly: four copies of one PDF are one thing
+    to find, not four. Scoring a flat list would demand all four and mark a
+    perfect answer as 25% recall — and results are deduplicated by content hash
+    anyway, so returning all four is impossible by construction.
+    """
+    groups: list[list[int]] = []
     unresolved: list[str] = []
     for value in ids:
-        matches = _lookup(conn, str(value))
+        matches, many_expected = _lookup(conn, str(value))
         if not matches:
             unresolved.append(str(value))
-        elif len(matches) > 1:
+        elif len(matches) > 1 and not many_expected:
             # Ambiguity is a bug in the query file, not a retrieval result.
             unresolved.append(f"{value} (ambiguous: {len(matches)} docs)")
         else:
-            resolved.append(matches[0])
-    return resolved, unresolved
+            groups.append(sorted(matches))
+    return groups, unresolved
 
 
 def corpus_fingerprint(conn: sqlite3.Connection) -> str:
@@ -328,26 +341,30 @@ def evaluate(
     rrs: list[float] = []
 
     for record in records:
-        relevant, unresolved = resolve_relevant(conn, record.relevant_doc_ids)
+        groups, unresolved = resolve_relevant(conn, record.relevant_doc_ids)
+        relevant = sorted({doc_id for group in groups for doc_id in group})
         hits = search(
             conn, record.q, mode=mode, limit=k,
             **({} if exclude_categories is None else {"exclude_categories": exclude_categories}),
         )
         retrieved = [h.doc_id for h in hits]
+        retrieved_set = set(retrieved)
 
         relevant_set = set(relevant)
         found = [d for d in retrieved if d in relevant_set]
 
+        # Recall counts groups, not documents: one label is one thing to find.
+        satisfied = [g for g in groups if retrieved_set.intersection(g)]
         first_rank = next(
             (i for i, doc_id in enumerate(retrieved, start=1) if doc_id in relevant_set), None
         )
-        recall = len(set(found)) / len(relevant_set) if relevant_set else 0.0
+        recall = len(satisfied) / len(groups) if groups else 0.0
         rr = 1.0 / first_rank if first_rank else 0.0
 
         # A query with no resolvable ground truth is unscored, not scored zero:
         # averaging in a zero for an unfilled record would flatter or damn the
         # index for a reason that has nothing to do with retrieval.
-        if relevant_set:
+        if groups:
             recalls.append(recall)
             rrs.append(rr)
         elif record.relevant_doc_ids:

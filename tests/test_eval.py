@@ -80,9 +80,11 @@ def test_missing_file_is_reported(tmp_path: Path) -> None:
 
 
 def test_source_uids_resolve_to_row_ids(indexed) -> None:
-    resolved, unresolved = resolve_relevant(indexed, ["ordinary-1@example.com"])
-    assert len(resolved) == 1 and not unresolved
-    title = indexed.execute("SELECT title FROM docs WHERE id = ?", (resolved[0],)).fetchone()[0]
+    groups, unresolved = resolve_relevant(indexed, ["ordinary-1@example.com"])
+    assert len(groups) == 1 and len(groups[0]) == 1 and not unresolved
+    title = indexed.execute(
+        "SELECT title FROM docs WHERE id = ?", (groups[0][0],)
+    ).fetchone()[0]
     assert title == "Re: Q2 warehouse lease renewal"
 
 
@@ -95,16 +97,16 @@ def test_row_ids_in_the_query_file_are_rejected(tmp_path: Path) -> None:
 
 
 def test_source_qualified_ids_resolve(indexed) -> None:
-    resolved, unresolved = resolve_relevant(indexed, ["file:ordinary-1@example.com"])
-    assert len(resolved) == 1 and not unresolved
+    groups, unresolved = resolve_relevant(indexed, ["file:ordinary-1@example.com"])
+    assert groups and len(groups[0]) == 1 and not unresolved
 
 
 def test_content_hash_ids_resolve(indexed) -> None:
     digest = indexed.execute(
         "SELECT content_hash FROM docs WHERE source_uid = 'ordinary-1@example.com'"
     ).fetchone()[0]
-    resolved, unresolved = resolve_relevant(indexed, [f"sha256:{digest}"])
-    assert len(resolved) == 1 and not unresolved
+    groups, unresolved = resolve_relevant(indexed, [f"sha256:{digest}"])
+    assert groups and len(groups[0]) == 1 and not unresolved
 
 
 def test_ambiguous_uid_is_reported_rather_than_guessed(indexed) -> None:
@@ -114,14 +116,14 @@ def test_ambiguous_uid_is_reported_rather_than_guessed(indexed) -> None:
         " ingested_at) VALUES ('gmail', 'ordinary-1@example.com', 'h2',"
         " '2026-01-01T00:00:00Z', 'header', '2026-01-01T00:00:00Z')"
     )
-    resolved, unresolved = resolve_relevant(indexed, ["ordinary-1@example.com"])
-    assert resolved == []
+    groups, unresolved = resolve_relevant(indexed, ["ordinary-1@example.com"])
+    assert groups == []
     assert "ambiguous" in unresolved[0]
 
 
 def test_unknown_ids_are_reported_not_dropped(indexed) -> None:
-    resolved, unresolved = resolve_relevant(indexed, ["nope@nowhere", "gmail:missing"])
-    assert resolved == []
+    groups, unresolved = resolve_relevant(indexed, ["nope@nowhere", "gmail:missing"])
+    assert groups == []
     assert set(unresolved) == {"nope@nowhere", "gmail:missing"}
 
 
@@ -266,3 +268,106 @@ def test_verify_runs_no_retrieval(indexed, monkeypatch) -> None:
         ev, "search", lambda *a, **k: pytest.fail("verify must not search")
     )
     ev.verify(indexed, load_queries(EXAMPLE_QUERIES))
+
+
+# --- sha256 labels --------------------------------------------------------
+#
+# The least-used of the three id forms, and the one the query file now depends
+# on: identity is the content, not the accident of how many messages carried it.
+
+
+def _duplicate_doc(conn, store, uid: str, raw: bytes) -> int:
+    from muster.ingest import ingest_message
+
+    return ingest_message(conn, store, source="gmail", source_uid=uid, raw=raw).doc_id
+
+
+def test_a_content_hash_resolves_to_every_copy(indexed, cfg) -> None:
+    """Four copies of one PDF are one thing to find, not four."""
+    from muster.blobs import BlobStore
+
+    store = BlobStore(cfg.blob_dir)
+    raw = b"Message-ID: <c1@x>\r\nSubject: Contract\r\n\r\nThe signed contract text.\r\n"
+    first = _duplicate_doc(indexed, store, "copy-1", raw)
+    second = _duplicate_doc(indexed, store, "copy-2", raw)
+    digest = indexed.execute("SELECT content_hash FROM docs WHERE id = ?", (first,)).fetchone()[0]
+
+    groups, unresolved = resolve_relevant(indexed, [f"sha256:{digest}"])
+    assert unresolved == []
+    assert len(groups) == 1, "one label, one group"
+    assert sorted(groups[0]) == sorted([first, second])
+
+
+def test_several_copies_are_not_reported_as_ambiguous(indexed, cfg) -> None:
+    """Identical bytes are the same document; a repeated source_uid is a bug."""
+    from muster.blobs import BlobStore
+
+    store = BlobStore(cfg.blob_dir)
+    raw = b"Message-ID: <c2@x>\r\nSubject: Contract\r\n\r\nAnother contract body.\r\n"
+    doc = _duplicate_doc(indexed, store, "dup-a", raw)
+    _duplicate_doc(indexed, store, "dup-b", raw)
+    digest = indexed.execute("SELECT content_hash FROM docs WHERE id = ?", (doc,)).fetchone()[0]
+
+    _groups, unresolved = resolve_relevant(indexed, [f"sha256:{digest}"])
+    assert unresolved == []
+
+
+def test_finding_any_copy_scores_full_recall(indexed, cfg) -> None:
+    """Deduplication means returning all four is impossible by construction."""
+    from muster.blobs import BlobStore
+
+    store = BlobStore(cfg.blob_dir)
+    raw = (
+        b"Message-ID: <c3@x>\r\nSubject: Zibeline procurement\r\n\r\n"
+        b"The zibeline procurement agreement is attached for signature.\r\n"
+    )
+    doc = _duplicate_doc(indexed, store, "zib-1", raw)
+    _duplicate_doc(indexed, store, "zib-2", raw)
+    _duplicate_doc(indexed, store, "zib-3", raw)
+    digest = indexed.execute("SELECT content_hash FROM docs WHERE id = ?", (doc,)).fetchone()[0]
+
+    run = evaluate(
+        indexed,
+        [QueryRecord(q="zibeline procurement agreement", relevant_doc_ids=[f"sha256:{digest}"])],
+        k=10,
+    )
+    assert run.recall_at_k == 1.0
+    assert run.results[0].first_relevant_rank == 1
+
+
+def test_an_unknown_content_hash_is_unresolved(indexed) -> None:
+    groups, unresolved = resolve_relevant(indexed, ["sha256:" + "0" * 64])
+    assert groups == []
+    assert unresolved == ["sha256:" + "0" * 64]
+
+
+def test_content_hash_and_uid_labels_mix(indexed) -> None:
+    digest = indexed.execute(
+        "SELECT content_hash FROM docs WHERE source_uid = 'ordinary-1@example.com'"
+    ).fetchone()[0]
+    groups, unresolved = resolve_relevant(
+        indexed, [f"sha256:{digest}", "file:deutsch-2@beispiel.de"]
+    )
+    assert len(groups) == 2 and unresolved == []
+
+
+def test_verify_accepts_a_multi_copy_content_hash(indexed, cfg) -> None:
+    from muster.blobs import BlobStore
+    from muster.evaluate import verify
+
+    store = BlobStore(cfg.blob_dir)
+    raw = b"Message-ID: <c4@x>\r\nSubject: Deed\r\n\r\nThe deed of assignment.\r\n"
+    doc = _duplicate_doc(indexed, store, "deed-1", raw)
+    _duplicate_doc(indexed, store, "deed-2", raw)
+    digest = indexed.execute("SELECT content_hash FROM docs WHERE id = ?", (doc,)).fetchone()[0]
+
+    report = verify(indexed, [QueryRecord(q="deed", relevant_doc_ids=[f"sha256:{digest}"])])
+    assert report.clean and report.resolvable == 1
+
+
+def test_the_query_file_uses_a_content_hash_where_it_should() -> None:
+    """Guards the decision itself: this label must not drift back to a uid."""
+    records = load_queries(EXAMPLE_QUERIES)
+    assert all(
+        isinstance(value, str) for r in records for value in r.relevant_doc_ids
+    )
