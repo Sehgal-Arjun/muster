@@ -898,7 +898,9 @@ def eval_cmd(
         EXAMPLE_QUERIES,
         EvalError,
         evaluate,
+        load_no_answer,
         load_queries,
+        probe_no_answer,
         resolve_queries_path,
         write_run,
     )
@@ -938,6 +940,9 @@ def eval_cmd(
             conn, records, mode=mode, k=k,
             corpus_path=str(db_path), exclude_categories=excluded,
         )
+        probe = probe_no_answer(
+            conn, load_no_answer(), mode=mode, k=k, exclude_categories=excluded
+        )
     except (EvalError, ValueError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
@@ -958,6 +963,21 @@ def eval_cmd(
         typer.echo(f"{marker}  {result.q[:60]:<62}{detail}")
         if result.unresolved:
             typer.echo(f"        unresolved ids: {', '.join(map(str, result.unresolved))}")
+
+    if probe.total:
+        style = typer.style if probe.leaks else (lambda s, **kw: s)
+        typer.echo(
+            "\n" + style(
+                f"no-answer probe: {probe.silent}/{probe.total} queries correctly "
+                "returned nothing",
+                fg="red" if probe.leaks else "green",
+            )
+        )
+        for leak in probe.leaks:
+            typer.echo(
+                f"  leaked  {leak.q[:36]:<38}{leak.returned} results, "
+                f"top {leak.top_score} {leak.arms or ''}"
+            )
 
     path = write_run(run, results_dir, include_text=include_text)
     typer.echo(

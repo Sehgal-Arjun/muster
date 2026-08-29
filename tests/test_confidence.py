@@ -159,3 +159,62 @@ def test_results_far_below_the_best_are_dropped(indexed) -> None:
     assert hits
     weakest, strongest = hits[-1].score, hits[0].score
     assert weakest >= strongest * 0.25
+
+
+# --- the no-answer probe --------------------------------------------------
+
+
+def test_the_committed_probe_set_is_present_and_synthetic() -> None:
+    """It lives in the repository so it cannot rot with the next model change."""
+    import json
+    import re
+    from pathlib import Path
+
+    path = Path(__file__).parent.parent / "eval" / "no_answer.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+    assert 6 <= len(records) <= 12
+    assert all(r["q"] and r["note"] for r in records)
+    # Invented words only: nothing here should look like a real address or id.
+    text = path.read_text()
+    assert "@" not in text.replace('"note"', "")
+    assert not re.search(r"\b[0-9a-f]{16}\b", text)
+
+
+def test_a_no_answer_probe_scores_silence_not_recall(indexed) -> None:
+    """Recall cannot see this failure.
+
+    A system returning its ten nearest neighbours for every input scores the
+    same on recall as one that knows when to stay quiet, and is far worse to
+    use. This is the failure the confidence floor exists to prevent.
+    """
+    from muster.evaluate import probe_no_answer
+
+    report = probe_no_answer(
+        indexed, ["zzzqqxx nonexistent", "flurble wumpus quaxinated"], mode="keyword"
+    )
+    assert report.total == 2
+    assert report.silent == 2
+    assert report.leaks == []
+
+
+def test_a_leak_is_reported_with_enough_detail_to_diagnose(indexed) -> None:
+    from muster.evaluate import probe_no_answer
+
+    # A query the corpus can answer, used as a stand-in for a leak.
+    report = probe_no_answer(indexed, ["warehouse lease renewal"], mode="keyword")
+    assert report.silent == 0
+    leak = report.leaks[0]
+    assert leak.returned > 0
+    assert leak.top_score > 0
+    assert leak.top_title
+
+
+def test_the_vector_floor_names_the_model_it_was_calibrated_on() -> None:
+    """Cosine distributions belong to the model; this number rots on a swap."""
+    from pathlib import Path
+
+    source = (Path(__file__).parent.parent / "muster" / "config.py").read_text()
+    block = source.split("min_score_vector")[0]
+    assert "bge-m3" in block[-2000:]
+    assert "re-swept" in block[-2000:] or "re-sweep" in block[-2000:]

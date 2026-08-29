@@ -73,11 +73,25 @@ class SearchConfig:
     # index and query at search time. Measured on a 1447-chunk index: queries
     # with a real answer score 4.9-13.8, queries without one 1.8-3.7.
     min_score_keyword: float = 4.0
-    # 0.60 was a guess and it cost 13 points of vector recall on a real
-    # 23-query set. Measured: every value up to 0.50 scores identically, so the
-    # floor sits below that with margin. Hybrid is unaffected at any value —
-    # the keyword arm covers what the vector floor removes.
-    min_score_vector: float = 0.45
+    # CALIBRATED FOR BAAI/bge-m3. Cosine distributions are a property of the
+    # model, not of the index: this number is meaningless under a different
+    # one and must be re-swept whenever `embed.model_id` changes. It was left
+    # at a bge-small value once already, which put it *below* the level bge-m3
+    # assigns to gibberish, so the arm rejected nothing and hybrid served ten
+    # confident wrong answers for "zzzqqxx nonexistent".
+    #
+    # Measured on 8038 documents, 31 real queries and 8 no-answer probes:
+    #
+    #   gibberish tops out at 0.511 (digit runs excepted, see below)
+    #   real queries: min 0.428, median 0.605, max 0.767
+    #   hybrid recall holds at 0.7419 up to 0.55 and falls to 0.6452 at 0.58
+    #
+    # 0.55 sits in the gap, takes the no-answer probe from 2/8 silent to 7/8,
+    # and improves hybrid MRR (0.5148 -> 0.5239). The eighth probe is
+    # "1234567890 0987654321" at 0.630: digit strings genuinely sit near
+    # reference numbers in embedding space, and a floor above that would also
+    # be above the median real query. The keyword arm is what refuses it.
+    min_score_vector: float = 0.55
     min_score_hybrid: float = 0.0  # arms are already floored before fusion
     # Drop results below this fraction of the best hit. Scale-free, and what
     # removes the flat tail that RRF in particular produces.

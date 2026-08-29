@@ -266,18 +266,25 @@ Switching models inserts alongside the old vectors rather than replacing them.
 
 ### Where it stands
 
-Corpus `81af6e3cf91dc885` — 8,038 documents spanning 2023-08 to 2026-08, 31
+Corpus `81af6e3cf91dc885` — 8,038 documents spanning 2023-08 to 2026-08, 34
 hand-written queries, k=10, `bge-m3`:
 
 | mode | recall@10 | MRR |
 |---|---|---|
-| keyword | 0.4839 | 0.3694 |
-| vector | 0.5161 | 0.3893 |
-| **hybrid** | **0.7419** | **0.5148** |
+| keyword | 0.5294 | 0.4103 |
+| vector | 0.4706 | 0.3811 |
+| **hybrid** | **0.7647** | **0.5659** |
 
 Hybrid beats the better arm by 40% on recall. That gap is the whole argument
 for keeping both: neither arm is reliably ahead, they fail on different
 queries, and fusing them recovers documents that neither finds alone.
+
+Alongside recall there is a **no-answer probe**: eight queries made of invented
+words, scored on whether search stays quiet. Recall cannot see this failure —
+a system returning its ten nearest neighbours for every input scores exactly as
+well as one that knows when to say nothing, and is far worse to use. It is
+committed at `eval/no_answer.jsonl` precisely so it cannot rot when the
+embedding model changes, which is how it broke last time.
 
 **Only compare runs with the same corpus fingerprint.** Every earlier number in
 this project's history was measured on a smaller corpus or a smaller query set,

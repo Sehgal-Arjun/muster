@@ -1,0 +1,8 @@
+{"q": "zzzqqxx nonexistent", "note": "gibberish tokens; nothing in any archive can match these"}
+{"q": "qwertyuiop asdfghjkl", "note": "keyboard mash"}
+{"q": "flurble wumpus quaxinated", "note": "invented words with English morphology — the shape a real query has, none of the content"}
+{"q": "blorptastic zibbenwhack", "note": "invented compound; checks the vector arm is not pattern-matching on word shape"}
+{"q": "grondle fitzhaven quimberly", "note": "invented proper nouns; person and place queries are the most common real shape, so the no-answer version matters"}
+{"q": "splunge kravitzel morbling", "note": "invented verb form"}
+{"q": "zzyzx quommel fenthwaite", "note": "rare letter distribution; nothing tokenises to these"}
+{"q": "1234567890 0987654321", "note": "digit runs; must not collide with invoice or reference numbers"}

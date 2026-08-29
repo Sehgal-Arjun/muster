@@ -46,6 +46,10 @@ DEFAULT_K = 10
 
 DEFAULT_QUERIES = Path("eval/queries.jsonl")
 EXAMPLE_QUERIES = Path("eval/queries.example.jsonl")
+# Queries the archive cannot answer. Committed, unlike the real set: they are
+# invented words, so there is nothing private about them, and a probe that
+# lives in the repository cannot quietly rot when the embedding model changes.
+NO_ANSWER_QUERIES = Path("eval/no_answer.jsonl")
 
 
 def query_id(text: str) -> str:
@@ -324,6 +328,84 @@ def verify(conn: sqlite3.Connection, records: list[QueryRecord]) -> VerifyReport
         duplicates=duplicates,
         total_ids=total_ids,
         bad_ids=bad_ids,
+    )
+
+
+@dataclass
+class Leak:
+    q: str
+    returned: int
+    top_score: float
+    top_title: str
+    arms: dict[str, int] | None
+
+
+@dataclass
+class NoAnswerReport:
+    """How often the index invents an answer to a query with none.
+
+    Recall says nothing about this. A system that returns its ten nearest
+    neighbours for every input scores exactly as well on recall as one that
+    knows when to stay quiet, and is far worse to use — the failure the
+    confidence floor exists to prevent, and the one most likely to come back
+    silently after a model change.
+    """
+
+    mode: str
+    total: int
+    silent: int
+    leaks: list[Leak]
+
+    @property
+    def rate(self) -> float:
+        return self.silent / self.total if self.total else 1.0
+
+
+def load_no_answer(path: Path | None = None) -> list[str]:
+    path = Path(path or NO_ANSWER_QUERIES)
+    if not path.exists():
+        return []
+    out: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "//")):
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise EvalError(f"{path}: not valid JSON ({exc})") from exc
+        if record.get("q"):
+            out.append(str(record["q"]))
+    return out
+
+
+def probe_no_answer(
+    conn: sqlite3.Connection,
+    queries: list[str],
+    *,
+    mode: str = "hybrid",
+    k: int = DEFAULT_K,
+    exclude_categories: frozenset[str] | None = None,
+) -> NoAnswerReport:
+    """Run queries with no possible answer and count how many stay quiet."""
+    leaks: list[Leak] = []
+    for q in queries:
+        hits = search(
+            conn, q, mode=mode, limit=k,
+            **({} if exclude_categories is None else {"exclude_categories": exclude_categories}),
+        )
+        if hits:
+            leaks.append(
+                Leak(
+                    q=q,
+                    returned=len(hits),
+                    top_score=round(hits[0].score, 4),
+                    top_title=(hits[0].title or "")[:60],
+                    arms=hits[0].arms or None,
+                )
+            )
+    return NoAnswerReport(
+        mode=mode, total=len(queries), silent=len(queries) - len(leaks), leaks=leaks
     )
 
 
