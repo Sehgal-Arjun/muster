@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from muster.categories import DEFAULT_EXCLUDED
 from muster.temporal import apply as apply_temporal
@@ -47,6 +47,17 @@ _STRIP_RE = re.compile(r"^\W+|\W+$", re.UNICODE)
 _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
+@dataclass(frozen=True)
+class DocRef:
+    """One copy of a document: enough to open it, not enough to rank it."""
+
+    doc_id: int
+    source: str
+    source_uid: str
+    title: str | None
+    doc_date: str
+
+
 @dataclass
 class Hit:
     doc_id: int
@@ -59,10 +70,22 @@ class Hit:
     score: float
     snippet: str
     content_hash: str | None = None
-    # How many identical copies this hit stands for. One offer-letter PDF in a
-    # real archive was attached to four messages under three filenames and took
-    # four of the top five slots on its own.
-    duplicates: int = 1
+    # Every copy of these bytes *in this result list*, best-scoring first. The
+    # result list describes itself: if the confidence floor cut two of four
+    # copies, two is the honest number to show.
+    copies: list[DocRef] = field(default_factory=list)
+    # Rank this document held in each arm before fusion, e.g.
+    # {"keyword": 1, "vector": 4}. Empty for single-arm modes. Agreement
+    # between arms is far stronger evidence than either alone, and it is
+    # precisely what RRF discards on its way to a single number.
+    arms: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def duplicates(self) -> int:
+        return max(len(self.copies), 1)
+
+    def as_ref(self) -> DocRef:
+        return DocRef(self.doc_id, self.source, self.source_uid, self.title, self.doc_date)
 
     @property
     def rank_key(self) -> float:
@@ -264,10 +287,11 @@ def collapse_duplicates(hits: list[Hit]) -> list[Hit]:
     for hit in hits:
         key = hit.content_hash or f"doc:{hit.doc_id}"
         if key not in best:
+            hit.copies = [hit.as_ref()]
             best[key] = hit
             order.append(key)
         else:
-            best[key].duplicates += 1
+            best[key].copies.append(hit.as_ref())
     return [best[key] for key in order]
 
 
@@ -440,6 +464,7 @@ def reciprocal_rank_fusion(
     k: int = RRF_K,
     limit: int = DEFAULT_LIMIT,
     weights: list[float] | None = None,
+    names: list[str] | None = None,
 ) -> list[Hit]:
     """Fuse ranked lists by w/(k + rank), summed per document.
 
@@ -460,11 +485,14 @@ def reciprocal_rank_fusion(
     """
     scores: dict[int, float] = {}
     representative: dict[int, Hit] = {}
+    arms: dict[int, dict[str, int]] = {}
     weights = weights or [1.0] * len(rankings)
+    names = names or [f"arm{i}" for i in range(len(rankings))]
 
-    for ranking, weight in zip(rankings, weights, strict=True):
+    for ranking, weight, name in zip(rankings, weights, names, strict=True):
         for rank, hit in enumerate(ranking, start=1):
             scores[hit.doc_id] = scores.get(hit.doc_id, 0.0) + weight / (k + rank)
+            arms.setdefault(hit.doc_id, {})[name] = rank
             # Keep the first list's snippet: keyword snippets show the match,
             # vector ones are just the head of the chunk.
             representative.setdefault(hit.doc_id, hit)
@@ -484,6 +512,7 @@ def reciprocal_rank_fusion(
                 score=score,
                 snippet=hit.snippet,
                 content_hash=hit.content_hash,
+                arms=arms.get(doc_id, {}),
             )
         )
     return collapse_duplicates(sorted(fused, key=lambda h: (-h.score, h.doc_date)))[:limit]
@@ -528,6 +557,7 @@ def hybrid_search(
         [keyword, vector],
         limit=limit,
         weights=[cfg.rrf_keyword_weight, cfg.rrf_vector_weight],
+        names=["keyword", "vector"],
     )
     fused_floor = _floor("hybrid")
     if fused_floor:

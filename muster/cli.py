@@ -448,6 +448,48 @@ def embed(
 
 
 @app.command()
+def serve(
+    host: Annotated[str, typer.Option("--host", help="Interface to bind.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Port to bind.")] = 8765,
+    unsafe_host: Annotated[
+        bool,
+        typer.Option(
+            "--i-know-what-this-does",
+            help="Permit binding a non-loopback interface.",
+        ),
+    ] = False,
+) -> None:
+    """Serve the read-only HTTP API for the desktop UI."""
+    import ipaddress
+
+    cfg = load_config()
+    _require_db(cfg)
+
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host in ("localhost",)
+    if not loopback and not unsafe_host:
+        # There is no authentication. Binding this to a routable address puts
+        # an entire personal mailbox on the network for anyone who asks.
+        typer.echo(
+            f"refusing to bind {host}: the API has no authentication and serves\n"
+            "the whole archive. Pass --i-know-what-this-does to override.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    try:
+        from muster.api import serve as run_server
+    except ImportError as exc:
+        typer.echo(f"the API extra is not installed: {exc}\n  pip install -e '.[api]'", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"muster api on http://{host}:{port}  (db {cfg.db_path})")
+    run_server(host=host, port=port, cfg=cfg)
+
+
+@app.command()
 def search(
     query: Annotated[str, typer.Argument(help="What to look for.")],
     limit: Annotated[int, typer.Option("--limit", "-n", help="How many results.")] = 10,

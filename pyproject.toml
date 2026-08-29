@@ -46,8 +46,14 @@ parse = [
 embed = [
     "sentence-transformers>=3.0",
 ]
+# The HTTP layer for the desktop UI. Read-only, loopback-only.
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
 dev = [
     "pytest>=8.0",
+    "httpx>=0.27",   # fastapi.testclient
 ]
 
 [project.scripts]
