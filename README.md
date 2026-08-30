@@ -292,6 +292,22 @@ and is not comparable to these. Growing the archive makes retrieval harder —
 more documents to be wrong about — so a falling number can mean the index got
 bigger rather than worse. The fingerprint is what tells the two apart.
 
+## Desktop UI
+
+A macOS panel on ⌘⇧Space — floats over fullscreen apps, does not steal focus,
+hides on blur, no Dock icon. Tauri v2 with React; the Rust shell knows nothing
+about retrieval and talks to `muster serve` over loopback.
+
+```sh
+muster serve                       # the index, read-only, on 127.0.0.1:8765
+cd ui && npm install && npm run tauri dev
+```
+
+`VITE_USE_MOCK=1` runs the whole screen against `ui/src/mock.ts` with no
+server, including the states that are awkward to provoke on demand — the
+confidence floor rejecting everything, a date lifted out of the query,
+four copies of one file collapsed into a single row.
+
 ## Configuration
 
 `~/.muster/config.toml`, all optional:

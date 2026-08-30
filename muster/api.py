@@ -411,6 +411,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
         return {
             "database": str(cfg.db_path),
+            # The UI needs a real path to reveal a file in Finder; a URL cannot
+            # be handed to the file manager. Blobs are content-addressed, so
+            # the path is derivable from a hash and this is the only missing
+            # half of it.
+            "blob_dir": str(cfg.blob_dir),
             "schema": {
                 "applied": applied,
                 "pending": [m.version for m in migrate.discover() if m.version not in set(applied)],

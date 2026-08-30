@@ -113,6 +113,8 @@ export interface DocResponse {
 
 export interface StatusResponse {
   database: string;
+  /** Root of the content-addressed store: {blob_dir}/{hash[:2]}/{hash}. */
+  blob_dir: string;
   schema: { applied: string[]; pending: string[] };
   counts: { docs: number; chunks: number; vectors: number; attachments: number };
   health: { unfindable: number; redacted: number; chunks_awaiting_vectors: number };
@@ -180,4 +182,8 @@ export const api = {
   status: () => get<StatusResponse>("/status"),
   blobUrl: (hash: string, download = false) =>
     `${BASE}/blob/${hash}${download ? "?download=1" : ""}`,
+
+  /** Where those bytes actually live, for Finder. */
+  blobPath: (blobDir: string, hash: string) =>
+    `${blobDir}/${hash.slice(0, 2)}/${hash}`,
 };

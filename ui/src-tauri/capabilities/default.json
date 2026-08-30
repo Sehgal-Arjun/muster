@@ -9,6 +9,7 @@
     "core:window:allow-show",
     "core:webview:allow-internal-toggle-devtools",
     "opener:allow-open-url",
+    "opener:allow-reveal-item-in-dir",
     "global-shortcut:default"
   ]
 }

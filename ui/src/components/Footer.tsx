@@ -3,7 +3,7 @@ import type { Mode, SearchResponse } from "../api";
 const HINTS: Array<[string, string]> = [
   ["↑↓", "navigate"],
   ["↵", "open"],
-  ["⌘↵", "reveal"],
+  ["⌘↵", "reveal in Finder"],
   ["⌘K", "actions"],
   ["⌘1/2/3", "mode"],
   ["esc", "close"],

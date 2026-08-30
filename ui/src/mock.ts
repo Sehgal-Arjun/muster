@@ -158,6 +158,7 @@ export const mockDoc: DocResponse = {
 
 export const mockStatus: StatusResponse = {
   database: "/Users/you/.muster/muster.db",
+  blob_dir: "/Users/you/.muster/blobs",
   schema: { applied: ["001_initial", "005_fts_party_column"], pending: [] },
   counts: { docs: 8038, chunks: 16078, vectors: 16078, attachments: 681 },
   health: { unfindable: 0, redacted: 94, chunks_awaiting_vectors: 0 },

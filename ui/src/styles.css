@@ -3,7 +3,9 @@
    surface is an input, a list and a footer. */
 
 :root {
-  --bg: rgba(28, 28, 30, 0.72);
+  /* Sits on top of an NSVisualEffectView, so this only needs to darken the
+     blur rather than provide the whole background. */
+  --bg: rgba(24, 24, 27, 0.55);
   --fg: #f2f2f7;
   --dim: #9a9aa2;
   --line: rgba(255, 255, 255, 0.08);

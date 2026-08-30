@@ -11,15 +11,37 @@
   },
   "app": {
     "macOSPrivateApi": true,
-    "windows": [],
+    "windows": [
+      {
+        "label": "spotlight",
+        "url": "index.html",
+        "title": "Muster",
+        "width": 720,
+        "height": 460,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "resizable": false,
+        "visible": false,
+        "shadow": true,
+        "skipTaskbar": true
+      }
+    ],
     "security": {
       "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8765 http://localhost:8765; img-src 'self' data: http://127.0.0.1:8765; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ],
     "macOS": {
       "minimumSystemVersion": "11.0"
     }

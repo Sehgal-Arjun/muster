@@ -283,12 +283,27 @@ def test_an_unknown_blob_is_404(client) -> None:
 def test_status_matches_the_documented_shape(client) -> None:
     body = client.get("/status").json()
     assert set(body) == {
-        "database", "schema", "counts", "health", "by_kind", "by_category",
-        "date_range", "embedding", "search_defaults", "corpus_fingerprint",
+        "database", "blob_dir", "schema", "counts", "health", "by_kind",
+        "by_category", "date_range", "embedding", "search_defaults",
+        "corpus_fingerprint",
     }
     assert body["counts"]["docs"] > 0
     assert body["schema"]["pending"] == []
     assert "chunks_awaiting_vectors" in body["health"]
+
+
+def test_status_exposes_the_blob_root_for_finder(client, cfg) -> None:
+    """Revealing a file takes a path; a URL cannot be handed to the file manager."""
+    from pathlib import Path
+
+    body = client.get("/status").json()
+    assert body["blob_dir"] == str(cfg.blob_dir)
+
+    digest = client.get("/search", params={"q": "warehouse lease"}).json()["results"][0][
+        "content_hash"
+    ]
+    on_disk = Path(body["blob_dir"]) / digest[:2] / digest
+    assert on_disk.exists(), "the documented path formula must actually resolve"
 
 
 def test_status_reports_the_corpus_fingerprint(client) -> None:

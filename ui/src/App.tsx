@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api, type Hit, type Mode, type SearchResponse } from "./api";
-import { mockSearchFor } from "./mock";
+import { mockSearchFor, mockStatus } from "./mock";
 import { Actions, type Action } from "./components/Actions";
 import { EmptyState } from "./components/EmptyState";
 import { Footer } from "./components/Footer";
@@ -25,6 +25,9 @@ export default function App() {
   const [selected, setSelected] = useState(0);
   const [showActions, setShowActions] = useState(false);
   const [override, setOverride] = useState<Record<string, string | number> | null>(null);
+  // Needed to turn a content hash into a path Finder can reveal. Fetched once;
+  // a search should never wait on it.
+  const [blobDir, setBlobDir] = useState<string | null>(null);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
@@ -36,6 +39,14 @@ export default function App() {
   const current: Hit | null = hits[selected] ?? null;
 
   useEffect(() => inputRef.current?.focus(), []);
+
+  useEffect(() => {
+    if (USE_MOCK) {
+      setBlobDir(mockStatus.blob_dir);
+      return;
+    }
+    api.status().then((s) => setBlobDir(s.blob_dir)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const q = query.trim();
@@ -78,27 +89,48 @@ export default function App() {
     await invoke("hide_panel").catch(() => {});
   }, []);
 
+  /** Open the original in whatever handles its type. */
   const open = useCallback(
-    async (hit: Hit | null, reveal = false) => {
-      if (!hit) return;
-      const url = hit.content_hash ? api.blobUrl(hit.content_hash, reveal) : null;
-      if (!url) return;
+    async (hit: Hit | null) => {
+      if (!hit?.content_hash) return;
+      const url = api.blobUrl(hit.content_hash);
       if (USE_MOCK) {
-        console.info(reveal ? "reveal" : "open", url);
+        console.info("open", url);
         return;
       }
       const { openUrl } = await import("@tauri-apps/plugin-opener");
       await openUrl(url);
-      if (!reveal) await hide();
+      await hide();
     },
     [hide],
+  );
+
+  /**
+   * Reveal the stored original in Finder.
+   *
+   * Finder takes a path, not a URL, which is why /status exposes blob_dir: the
+   * store is content-addressed, so the hash plus that root is the whole path.
+   */
+  const reveal = useCallback(
+    async (hit: Hit | null) => {
+      if (!hit?.content_hash || !blobDir) return;
+      const path = api.blobPath(blobDir, hit.content_hash);
+      if (USE_MOCK) {
+        console.info("reveal", path);
+        return;
+      }
+      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+      await revealItemInDir(path);
+      await hide();
+    },
+    [blobDir, hide],
   );
 
   const actions: Action[] = useMemo(() => {
     if (!current) return [];
     const list: Action[] = [
       { id: "open", label: "Open original", hint: "↵", run: () => open(current) },
-      { id: "download", label: "Download a copy", hint: "⌘↵", run: () => open(current, true) },
+      { id: "reveal", label: "Reveal in Finder", hint: "⌘↵", run: () => reveal(current) },
       {
         id: "copy-title",
         label: "Copy subject",
@@ -125,7 +157,7 @@ export default function App() {
       });
     }
     return list;
-  }, [current, open]);
+  }, [current, open, reveal]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (showActions) return;
@@ -143,7 +175,7 @@ export default function App() {
       setSelected((i) => Math.max(i - 1, 0));
     } else if (event.key === "Enter") {
       event.preventDefault();
-      void open(current, meta);
+      void (meta ? reveal(current) : open(current));
     } else if (meta && event.key.toLowerCase() === "k") {
       event.preventDefault();
       if (current) setShowActions(true);

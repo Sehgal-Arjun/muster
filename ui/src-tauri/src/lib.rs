@@ -14,7 +14,7 @@ use tauri::{Manager, WebviewUrl};
 
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{
-    tauri_panel, CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask,
+    tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt,
 };
 
 pub const PANEL: &str = "spotlight";
@@ -116,32 +116,47 @@ pub fn run() {
 
 #[cfg(target_os = "macos")]
 fn build_panel(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::{LogicalSize, Size};
+    // The window is declared undecorated in tauri.conf.json and converted here,
+    // rather than built by PanelBuilder.
+    //
+    // Both alternatives abort the process, and it took a while to see why. tao
+    // wires up the titlebar and its traffic-light buttons when it creates a
+    // window; clearing the Titled bit from the style mask afterwards leaves it
+    // holding views that no longer exist, and the resulting panic crosses an
+    // Objective-C frame, so it cannot unwind and takes the process with it.
+    // StyleMask::new() starts from Titled|Closable|Miniaturizable|Resizable, so
+    // the only safe way to a bare panel is never to ask for decorations at all.
+    let window = app
+        .get_webview_window(PANEL)
+        .ok_or("window `spotlight` is missing from tauri.conf.json")?;
 
-    let panel = PanelBuilder::<_, SpotlightPanel>::new(app, PANEL)
-        .url(WebviewUrl::App("index.html".into()))
-        .title("Muster")
-        .size(Size::Logical(LogicalSize::new(720.0, 460.0)))
-        .transparent(true)
-        .has_shadow(true)
-        .corner_radius(12.0)
-        // Above normal windows but below the menu bar, which is where a
-        // summoned launcher belongs.
-        .level(PanelLevel::Floating)
-        .floating(true)
-        .hides_on_deactivate(false)
-        .style_mask(StyleMask::new().nonactivating_panel())
-        .collection_behavior(
-            CollectionBehavior::new()
-                // The two that matter: appear on whichever Space is in front,
-                // including over an app that is fullscreen.
-                .can_join_all_spaces()
-                .full_screen_auxiliary()
-                // Not a window you Cmd-Tab to.
-                .ignores_cycle(),
-        )
-        .with_window(|window| window.decorations(false).resizable(false).visible(false))
-        .build()?;
+    // Frosted background. Applied to the window before conversion, while it is
+    // still an ordinary NSWindow.
+    #[cfg(target_os = "macos")]
+    window_vibrancy::apply_vibrancy(
+        &window,
+        window_vibrancy::NSVisualEffectMaterial::HudWindow,
+        Some(window_vibrancy::NSVisualEffectState::Active),
+        Some(12.0),
+    )?;
+
+    let panel = window.to_panel::<SpotlightPanel>()?;
+
+    panel.set_level(PanelLevel::Floating.into());
+    panel.set_floating_panel(true);
+    panel.set_hides_on_deactivate(false);
+    // Safe here, unlike on a decorated window: there is no titlebar to orphan.
+    panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
+    panel.set_collection_behavior(
+        CollectionBehavior::new()
+            // The two that matter: appear on whichever Space is in front,
+            // including over an app that is fullscreen.
+            .can_join_all_spaces()
+            .full_screen_auxiliary()
+            // Not a window you Cmd-Tab to.
+            .ignores_cycle()
+            .into(),
+    );
 
     // Dismiss on blur. Clicking away is the ordinary way to close a launcher,
     // and leaving it up over another app is worse than closing it too eagerly.
@@ -151,6 +166,13 @@ fn build_panel(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
         hide(&handle);
     });
     panel.set_event_handler(Some(handler.as_ref()));
+
+    // A panel that only ever appears on a global hotkey cannot be verified
+    // without Accessibility permission to synthesise one. This makes it
+    // visible on launch instead, which is how the rendering above was checked.
+    if std::env::var("MUSTER_SHOW_ON_START").is_ok() {
+        panel.show();
+    }
 
     Ok(())
 }

@@ -257,6 +257,7 @@ Same numbers as `muster status`, for the UI's footer and empty state.
 ```json
 {
   "database": "/Users/you/.muster/muster.db",
+  "blob_dir": "/Users/you/.muster/blobs",
   "schema": { "applied": ["001_initial", "…", "005_fts_party_column"], "pending": [] },
   "counts": { "docs": 8038, "chunks": 16078, "vectors": 16078, "attachments": 681 },
   "health": { "unfindable": 0, "redacted": 94, "chunks_awaiting_vectors": 0 },
@@ -272,6 +273,10 @@ Same numbers as `muster status`, for the UI's footer and empty state.
   "corpus_fingerprint": "81af6e3cf91dc885"
 }
 ```
+
+`blob_dir` is the root of the content-addressed store. A blob's path is
+`{blob_dir}/{hash[:2]}/{hash}` — the UI needs it to reveal a file in Finder,
+which takes a path and not a URL.
 
 `chunks_awaiting_vectors` above zero means the vector arm is incomplete and
 hybrid is quietly degraded. The UI should surface it; it is the single most
