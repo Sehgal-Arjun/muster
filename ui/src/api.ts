@@ -1,0 +1,183 @@
+/**
+ * The shapes in docs/api.md, and the client that fetches them.
+ *
+ * These types are hand-written against that document rather than generated,
+ * so a mismatch shows up as a compile error here rather than as `undefined`
+ * three components deep.
+ */
+
+export type Mode = "keyword" | "vector" | "hybrid";
+export type Kind = "message" | "attachment" | "other";
+export type Scale = "bm25" | "cosine" | "rrf" | "unknown";
+
+export interface SourceRef {
+  doc_id: number;
+  source: string;
+  source_uid: string;
+  title: string | null;
+  date: string;
+}
+
+export interface Score {
+  value: number;
+  scale: Scale;
+  /** value / results[0].value. A list that is flat near 1.0 is a bad list. */
+  of_best: number | null;
+  /** Rank each arm gave this before fusion. Null in single-arm modes. */
+  arms: Record<string, number> | null;
+}
+
+export interface Hit {
+  rank: number;
+  doc_id: number;
+  title: string | null;
+  snippet: string;
+  date: string;
+  source: string;
+  kind: Kind;
+  mime: string | null;
+  counterparty: string | null;
+  sender: { name: string | null; address: string | null } | null;
+  category: string | null;
+  attachment_count: number;
+  content_hash: string | null;
+  /** Copies in *this result list*, best first. Renders as (xN). */
+  sources: SourceRef[];
+  score: Score;
+}
+
+export type EmptyCode =
+  | "empty_query"
+  | "no_matches"
+  | "below_confidence_floor"
+  | "no_vectors_for_model";
+
+export interface EmptyReason {
+  code: EmptyCode;
+  message: string;
+  matched: number;
+  best_score: number | null;
+  floor: number | null;
+  /** Params to resubmit verbatim to see the weak matches anyway. */
+  retry: Record<string, string | number> | null;
+}
+
+export interface SearchResponse {
+  query: {
+    raw: string;
+    searched: string;
+    mode: Mode;
+    limit: number;
+    temporal: { matched: string; since: string; until: string } | null;
+    filters: {
+      since: string | null;
+      until: string | null;
+      excluded_categories: string[];
+    };
+  };
+  results: Hit[];
+  empty_reason: EmptyReason | null;
+  took_ms: number;
+}
+
+export interface Attachment {
+  filename: string | null;
+  mime: string | null;
+  content_hash: string;
+  bytes: number | null;
+  url: string;
+  doc_id: number | null;
+}
+
+export interface DocResponse {
+  id: number;
+  source: string;
+  source_uid: string;
+  kind: Kind;
+  title: string | null;
+  date: string;
+  date_source: string;
+  mime: string | null;
+  category: string | null;
+  sender: { name: string | null; address: string | null } | null;
+  counterparty: string | null;
+  thread_uid: string | null;
+  text: string;
+  chunk_count: number;
+  redacted_by: string | null;
+  excluded_sender: string | null;
+  blob: { hash: string; bytes: number | null; mime: string | null; url: string; filename: string } | null;
+  attachments: Attachment[];
+  copies: SourceRef[];
+}
+
+export interface StatusResponse {
+  database: string;
+  schema: { applied: string[]; pending: string[] };
+  counts: { docs: number; chunks: number; vectors: number; attachments: number };
+  health: { unfindable: number; redacted: number; chunks_awaiting_vectors: number };
+  by_kind: Record<string, number>;
+  by_category: Record<string, number>;
+  date_range: { earliest: string | null; latest: string | null };
+  embedding: { model_id: string; dimensions: number | null };
+  search_defaults: { modes: Mode[]; default_mode: Mode; excluded_categories: string[] };
+  corpus_fingerprint: string;
+}
+
+export class ApiError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+const BASE = import.meta.env.VITE_MUSTER_API ?? "http://127.0.0.1:8765";
+
+async function get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
+  const url = new URL(path, BASE);
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (value !== undefined && value !== null && value !== "") {
+      url.searchParams.set(key, String(value));
+    }
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (cause) {
+    // The server is a separate process the user starts themselves, so "not
+    // running" is an ordinary state rather than an exceptional one.
+    throw new ApiError("unreachable", `No server at ${BASE}. Run \`muster serve\`.`, 0);
+  }
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    const error = body?.error;
+    throw new ApiError(
+      error?.code ?? "http_error",
+      error?.message ?? `${response.status} ${response.statusText}`,
+      response.status,
+    );
+  }
+  return (await response.json()) as T;
+}
+
+export const api = {
+  search: (params: {
+    q: string;
+    mode?: Mode;
+    limit?: number;
+    since?: string;
+    until?: string;
+    min_score?: number;
+    all_categories?: boolean;
+  }) => get<SearchResponse>("/search", params),
+
+  doc: (id: number) => get<DocResponse>(`/doc/${id}`),
+  status: () => get<StatusResponse>("/status"),
+  blobUrl: (hash: string, download = false) =>
+    `${BASE}/blob/${hash}${download ? "?download=1" : ""}`,
+};

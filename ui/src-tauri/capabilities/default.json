@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the panel window is allowed to do. Deliberately small: it renders search results and opens files, and needs nothing else.",
+  "windows": ["spotlight"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:webview:allow-internal-toggle-devtools",
+    "opener:allow-open-url",
+    "global-shortcut:default"
+  ]
+}

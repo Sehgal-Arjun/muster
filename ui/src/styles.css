@@ -1,0 +1,293 @@
+/* A panel, not a page: no chrome, no scroll on the body, one dark surface.
+   Written by hand rather than pulled from a component library — the whole
+   surface is an input, a list and a footer. */
+
+:root {
+  --bg: rgba(28, 28, 30, 0.72);
+  --fg: #f2f2f7;
+  --dim: #9a9aa2;
+  --line: rgba(255, 255, 255, 0.08);
+  --sel: rgba(120, 140, 255, 0.18);
+  --mark: rgba(255, 214, 102, 0.28);
+  --accent: #7f9cff;
+  --radius: 12px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; margin: 0; }
+
+body {
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  color: var(--fg);
+  /* Transparent so the NSVisualEffectView behind the webview shows through. */
+  background: transparent;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* --- query ------------------------------------------------------------- */
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.query {
+  flex: 1;
+  background: none;
+  border: 0;
+  outline: none;
+  color: var(--fg);
+  font-size: 19px;
+  font-weight: 400;
+}
+
+.query::placeholder { color: var(--dim); }
+
+.rewritten {
+  font-size: 11px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+
+/* --- results ----------------------------------------------------------- */
+
+.results { flex: 1; overflow-y: auto; }
+.results::-webkit-scrollbar { width: 0; }
+
+.rows { list-style: none; margin: 0; padding: 6px; }
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  cursor: default;
+}
+
+.row.selected { background: var(--sel); }
+
+.icon { width: 16px; height: 16px; margin-top: 2px; flex: none; color: var(--dim); }
+.row.selected .icon { color: var(--accent); }
+
+.row-body { flex: 1; min-width: 0; }
+
+.row-title { display: flex; align-items: baseline; gap: 7px; }
+
+.title {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.copies {
+  font-size: 11px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 4px;
+  flex: none;
+}
+
+.snippet {
+  display: block;
+  color: var(--dim);
+  font-size: 12px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.snippet mark {
+  background: var(--mark);
+  color: var(--fg);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.row-meta {
+  display: flex;
+  gap: 10px;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.row-meta .who {
+  max-width: 220px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+/* --- score ------------------------------------------------------------- */
+
+.score { display: flex; align-items: center; gap: 8px; flex: none; margin-top: 2px; }
+
+.arms { display: flex; gap: 3px; }
+
+.arm {
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+/* One arm alone is weaker evidence than two agreeing; say so quietly. */
+.arms-weak .arm { opacity: 0.55; }
+
+.bar { width: 34px; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.bar-fill { display: block; height: 100%; background: var(--accent); }
+
+/* --- empty states ------------------------------------------------------ */
+
+.empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 26px;
+  text-align: center;
+}
+
+.empty-headline { font-size: 15px; font-weight: 500; }
+.empty-detail { font-size: 12px; color: var(--dim); max-width: 460px; }
+.dim { color: var(--dim); }
+
+.retry {
+  margin-top: 10px;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 11px;
+}
+
+.retry:hover { background: var(--sel); }
+
+code {
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+/* --- footer ------------------------------------------------------------ */
+
+.footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 14px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.hints { display: flex; gap: 11px; }
+.hint { display: flex; align-items: center; gap: 4px; }
+
+kbd {
+  font-family: inherit;
+  font-size: 10px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 4px;
+  color: var(--fg);
+}
+
+.footer-right { display: flex; align-items: center; gap: 9px; }
+.mode { text-transform: lowercase; color: var(--accent); }
+.err { color: #ff8080; }
+
+/* --- ⌘K sheet ---------------------------------------------------------- */
+
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 40px 20px;
+}
+
+.sheet {
+  width: 100%;
+  max-width: 420px;
+  background: #232326;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+}
+
+.sheet-head {
+  padding: 9px 12px;
+  font-size: 11px;
+  color: var(--dim);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sheet-input {
+  width: 100%;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  outline: none;
+  color: var(--fg);
+  font: inherit;
+  padding: 9px 12px;
+}
+
+.sheet-list { list-style: none; margin: 0; padding: 5px; max-height: 210px; overflow-y: auto; }
+
+.sheet-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 9px;
+  border-radius: 6px;
+}
+
+.sheet-item.selected { background: var(--sel); }
