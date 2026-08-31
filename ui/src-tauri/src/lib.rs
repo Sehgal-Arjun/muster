@@ -92,7 +92,14 @@ fn toggle(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    let mut builder = tauri::Builder::default()
+        // Must be registered first, per the plugin's contract.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // A second launch summons the copy already running rather than
+            // starting a rival that fights it for the hotkey.
+            toggle(app);
+        }))
+        .plugin(tauri_plugin_opener::init());
 
     #[cfg(target_os = "macos")]
     {

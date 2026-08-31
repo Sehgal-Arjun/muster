@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Starts `muster serve` at login and keeps it up.
+
+  The index lives outside the app deliberately. Bundling Python into the .app
+  would mean shipping a second copy of torch and the embedding model, and it
+  would put a two-hour backfill behind a double-click. A LaunchAgent keeps the
+  server a separate, restartable thing that the panel merely talks to — and if
+  it is not running, the panel says so rather than appearing broken.
+
+  Installed to ~/Library/LaunchAgents/ by packaging/install.sh.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.muster.desktop.serve</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__MUSTER_BIN__</string>
+        <string>serve</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart if it dies. It is the only thing the panel can talk to. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Do not hammer the CPU if it is crash-looping on a broken database. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.muster/serve.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.muster/serve.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

@@ -84,9 +84,19 @@ export default function App() {
   }, [selected]);
 
   const hide = useCallback(async () => {
+    // Clear on the way out so the next summon is a fresh prompt rather than
+    // whatever was left behind.
+    setQuery("");
+    setResponse(null);
     if (USE_MOCK) return;
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("hide_panel").catch(() => {});
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("hide_panel");
+    } catch (cause) {
+      // Swallowing this leaves a panel on screen that will not close and no
+      // clue why. It is the one error the user cannot work around.
+      setError(`Could not close the panel: ${cause}`);
+    }
   }, []);
 
   /** Open the original in whatever handles its type. */
@@ -164,9 +174,10 @@ export default function App() {
     const meta = event.metaKey || event.ctrlKey;
 
     if (event.key === "Escape") {
+      // Always closes. Clearing the text on the first press and closing on the
+      // second reads as "escape did nothing" to anyone who meant to dismiss it.
       event.preventDefault();
-      if (query) setQuery("");
-      else void hide();
+      void hide();
     } else if (event.key === "ArrowDown") {
       event.preventDefault();
       setSelected((i) => Math.min(i + 1, hits.length - 1));

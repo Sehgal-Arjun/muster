@@ -26,6 +26,11 @@ tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.
 # behind it, `transparent: true` is literally see-through and the text behind
 # the panel reads straight through the results.
 window-vibrancy = "0.6"
+# Two copies of a hotkey launcher is not a mild bug: both register the same
+# shortcut, so each press toggles them in opposite phase and one is always on
+# screen with no way to dismiss it. Easy to hit — rebuild while the old one is
+# still resident.
+tauri-plugin-single-instance = "2"
 
 [target."cfg(any(target_os = \"macos\", windows, target_os = \"linux\"))".dependencies]
 tauri-plugin-global-shortcut = "2"
