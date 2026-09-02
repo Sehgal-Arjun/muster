@@ -10,7 +10,7 @@
 //! Nothing here knows anything about retrieval. The panel talks to
 //! `muster serve` over loopback HTTP, which the user starts themselves.
 
-use tauri::{Manager, WebviewUrl};
+use tauri::{Emitter, Manager};
 
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{
@@ -18,6 +18,8 @@ use tauri_nspanel::{
 };
 
 pub const PANEL: &str = "spotlight";
+/// Emitted on every summon so the frontend can take focus. See `toggle`.
+pub const SHOWN_EVENT: &str = "muster://shown";
 
 #[cfg(target_os = "macos")]
 tauri_panel! {
@@ -49,9 +51,29 @@ fn hide_panel(app: tauri::AppHandle) {
 
 #[cfg(target_os = "macos")]
 fn hide(app: &tauri::AppHandle) {
-    if let Ok(panel) = app.get_webview_panel(PANEL) {
-        panel.hide();
-    }
+    on_main(app, |panel| panel.hide());
+}
+
+/// Run something against the panel on the main thread.
+///
+/// Everything here is AppKit, and AppKit off the main thread does not raise —
+/// it quietly does nothing. Both dismissal paths arrive off it: a `#[tauri::command]`
+/// is dispatched to a worker thread, where the panel store is not even reachable,
+/// and the global-shortcut handler is called from the shortcut plugin's own
+/// thread, where `hide` returned without hiding anything. That is the whole of
+/// "escape does nothing" and "the hotkey will not close it": the calls were
+/// being made, on a thread where they could not take effect.
+#[cfg(target_os = "macos")]
+fn on_main<F>(app: &tauri::AppHandle, work: F)
+where
+    F: FnOnce(tauri_nspanel::PanelHandle<tauri::Wry>) + Send + 'static,
+{
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Ok(panel) = handle.get_webview_panel(PANEL) {
+            work(panel);
+        }
+    });
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -63,19 +85,36 @@ fn hide(app: &tauri::AppHandle) {
 
 #[cfg(target_os = "macos")]
 fn toggle(app: &tauri::AppHandle) {
-    let Ok(panel) = app.get_webview_panel(PANEL) else {
-        return;
-    };
-    if panel.is_visible() {
-        panel.hide();
-    } else {
-        // Centre on the screen the pointer is on, not the one the panel was
-        // last shown on: a summoned panel should appear where you are looking.
-        if let Some(window) = panel.to_window() {
-            let _ = window.center();
+    let handle = app.clone();
+    on_main(app, move |panel| {
+        if panel.is_visible() {
+            panel.hide();
+        } else {
+            // Centre before showing, so a summon never lands somewhere stale.
+            //
+            // Look the window up rather than calling `panel.to_window()`. That
+            // is a conversion, not an accessor: it unregisters the panel, drops
+            // the resign-key handler, and sets the Objective-C class back to
+            // NSWindow. Reaching through it for `center` destroyed the panel on
+            // the very first summon — which is why Escape then found nothing to
+            // hide, the hotkey could not toggle, and clicking away never
+            // dismissed. All three were the same line.
+            if let Some(window) = handle.get_webview_window(PANEL) {
+                let _ = window.center();
+            }
+            panel.show_and_make_key();
+            // Not redundant with show_and_make_key. Under ActivationPolicy::Accessory
+            // the app is never frontmost, and ordering the panel front does not by
+            // itself hand it key status — without this the panel renders but no
+            // keystroke reaches the webview, and window_did_resign_key can never
+            // fire because the panel was never key, so click-away never dismisses.
+            panel.make_key_window();
+            // The webview is not remounted between summons, so the text field's
+            // focus-on-mount only ever fires once. Every subsequent summon needs to
+            // be told to take focus again, or the panel appears and swallows typing.
+            let _ = handle.emit(SHOWN_EVENT, ());
         }
-        panel.show_and_make_key();
-    }
+    });
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -174,25 +213,6 @@ fn build_panel(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
     });
     panel.set_event_handler(Some(handler.as_ref()));
 
-    // A panel that only ever appears on a global hotkey cannot be verified
-    // without Accessibility permission to synthesise one. This makes it
-    // visible on launch instead, which is how the rendering above was checked.
-    if std::env::var("MUSTER_SHOW_ON_START").is_ok() {
-        panel.show();
-    }
-
-    // Proves the Rust side of dismissal works without needing a keystroke,
-    // which is otherwise unverifiable without Accessibility permission.
-    if std::env::var("MUSTER_SELFTEST").is_ok() {
-        let handle = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(6));
-            eprintln!("[selftest] hiding");
-            let inner = handle.clone();
-            let _ = handle.run_on_main_thread(move || hide(&inner));
-        });
-    }
-
     Ok(())
 }
 
@@ -201,7 +221,7 @@ fn build_panel(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
     // Everything the panel gives us is macOS-only. Elsewhere this is an
     // ordinary window, which is honest about what it is rather than a
     // half-imitation.
-    tauri::WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App("index.html".into()))
+    tauri::WebviewWindowBuilder::new(app, PANEL, tauri::WebviewUrl::App("index.html".into()))
         .title("Muster")
         .inner_size(720.0, 460.0)
         .decorations(false)
@@ -230,6 +250,9 @@ fn register_hotkey(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Err
             .build(),
     )?;
 
+    // Propagated, not logged: if the shortcut is taken the app has no other way
+    // in at all, and a line on stderr nobody reads is indistinguishable from it
+    // working.
     app.global_shortcut().register(hotkey)?;
     Ok(())
 }

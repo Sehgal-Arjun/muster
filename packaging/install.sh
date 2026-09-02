@@ -46,8 +46,24 @@ sed -e "s|__MUSTER_BIN__|$MUSTER_BIN|g" \
 
 # bootout before bootstrap: launchctl refuses to load a label already present,
 # and this script has to be safe to re-run after every rebuild.
+#
+# bootout returns before the job's process has actually exited, and bootstrapping
+# while the old one is still alive fails with a bare "Input/output error" — which
+# under `set -e` aborts the install half-done, with the app copied but no login
+# item. So wait for it to go, then retry rather than trusting one attempt.
 launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$UID" "$AGENT"
+for _ in $(seq 1 10); do
+    pgrep -f "$MUSTER_BIN serve" >/dev/null 2>&1 || break
+    sleep 1
+done
+for attempt in 1 2 3; do
+    if launchctl bootstrap "gui/$UID" "$AGENT" 2>/dev/null; then
+        break
+    fi
+    [ "$attempt" = 3 ] && { echo "Could not start the server: launchctl bootstrap $LABEL failed." >&2; exit 1; }
+    pkill -f "$MUSTER_BIN serve" 2>/dev/null || true
+    sleep 2
+done
 say "server     launchd $LABEL (log: ~/.muster/serve.log)"
 
 # --- 3. launch at login ----------------------------------------------------

@@ -40,6 +40,44 @@ export default function App() {
 
   useEffect(() => inputRef.current?.focus(), []);
 
+  /**
+   * Take focus on every summon, not just the first.
+   *
+   * The panel is hidden and re-shown rather than rebuilt, so the webview is
+   * mounted exactly once and the effect above fires exactly once. Without this
+   * the second summon draws a panel whose text field is not the first responder
+   * — it appears, and then silently eats everything typed into it.
+   *
+   * A window `focus` listener is the belt to the event's braces: it also covers
+   * focus arriving without a summon, such as clicking the panel back to front.
+   */
+  useEffect(() => {
+    if (USE_MOCK) return;
+    const focus = () => {
+      // A frame late, because the field cannot be made first responder until
+      // the panel it lives in has actually become key.
+      requestAnimationFrame(() => inputRef.current?.focus());
+    };
+    const summoned = () => {
+      // Every summon is a fresh prompt. Dismissing with the hotkey hides the
+      // panel from Rust without running hide() below, so without this it comes
+      // back still holding the last query and its results.
+      setQuery("");
+      setResponse(null);
+      focus();
+    };
+    // Only focus, not clear: regaining focus by clicking the panel back to the
+    // front should not throw away what is already typed in it.
+    window.addEventListener("focus", focus);
+    const unlisten = import("@tauri-apps/api/event").then(({ listen }) =>
+      listen("muster://shown", summoned),
+    );
+    return () => {
+      window.removeEventListener("focus", focus);
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
   useEffect(() => {
     if (USE_MOCK) {
       setBlobDir(mockStatus.blob_dir);
@@ -169,16 +207,33 @@ export default function App() {
     return list;
   }, [current, open, reveal]);
 
+  /**
+   * Escape lives on the document, not on the container below.
+   *
+   * A React handler on `.app` only sees keys when focus is already somewhere
+   * inside it. If focus is anywhere else the press is simply lost, which is
+   * exactly the "escape does nothing" the panel shipped with. Escape always
+   * closes — clearing the text on the first press and closing on the second
+   * reads as a dead key to anyone who meant to dismiss it.
+   */
+  useEffect(() => {
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      // The actions palette owns Escape while it is open: it should close on
+      // its own without taking the panel with it.
+      if (showActions) return;
+      void hide();
+    };
+    document.addEventListener("keydown", onEscape);
+    return () => document.removeEventListener("keydown", onEscape);
+  }, [showActions, hide]);
+
   function onKeyDown(event: React.KeyboardEvent) {
     if (showActions) return;
     const meta = event.metaKey || event.ctrlKey;
 
-    if (event.key === "Escape") {
-      // Always closes. Clearing the text on the first press and closing on the
-      // second reads as "escape did nothing" to anyone who meant to dismiss it.
-      event.preventDefault();
-      void hide();
-    } else if (event.key === "ArrowDown") {
+    if (event.key === "ArrowDown") {
       event.preventDefault();
       setSelected((i) => Math.min(i + 1, hits.length - 1));
     } else if (event.key === "ArrowUp") {
