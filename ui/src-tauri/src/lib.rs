@@ -181,6 +181,18 @@ fn build_panel(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
         panel.show();
     }
 
+    // Proves the Rust side of dismissal works without needing a keystroke,
+    // which is otherwise unverifiable without Accessibility permission.
+    if std::env::var("MUSTER_SELFTEST").is_ok() {
+        let handle = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(6));
+            eprintln!("[selftest] hiding");
+            let inner = handle.clone();
+            let _ = handle.run_on_main_thread(move || hide(&inner));
+        });
+    }
+
     Ok(())
 }
 
