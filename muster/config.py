@@ -159,6 +159,11 @@ class Config:
     # than you. Empty is fine: outbound mail is then detected by label alone.
     own_addresses: frozenset[str] = frozenset()
 
+    @property
+    def lock_path(self) -> Path:
+        """The sync lock, one per home — two mailboxes still serialise."""
+        return self.home / "sync.lock"
+
     def ensure_dirs(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

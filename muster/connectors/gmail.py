@@ -15,7 +15,7 @@ import base64
 import logging
 import random
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,14 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 DEFAULT_QUERY = "newer_than:7d"
 PAGE_SIZE = 500
 MAX_ATTEMPTS = 5
+
+
+class HistoryTooOld(RuntimeError):
+    """The stored historyId is older than Gmail is willing to answer for.
+
+    Gmail keeps history for roughly a week. Past that the only honest answer is
+    "list the mailbox again", which is what the caller falls back to.
+    """
 
 
 class GmailAuthError(RuntimeError):
@@ -115,6 +123,119 @@ class GmailConnector:
             creds = _credentials(self.credentials_path, self.token_path)
             self._service = build("gmail", "v1", credentials=creds, cache_discovery=False)
         return self._service
+
+    def current_history_id(self) -> str | None:
+        """The mailbox's history cursor right now. One request.
+
+        Used to start incremental sync from "everything up to here is already
+        indexed" after a full pass, and to bootstrap when nothing is stored.
+        """
+        profile = _retrying(
+            lambda: self.service.users().getProfile(userId="me").execute(),
+            what="users.getProfile",
+        )
+        history_id = profile.get("historyId")
+        return str(history_id) if history_id is not None else None
+
+    def history_since(self, start_history_id: str) -> tuple[list[str], str | None]:
+        """Message ids added since ``start_history_id``, and the new cursor.
+
+        This is the whole point of incremental sync: with nothing new it is a
+        single request that returns a cursor and no history at all, rather than
+        a listing of the mailbox.
+
+        Raises :class:`HistoryTooOld` when Gmail has expired the cursor, which
+        is a routine event after about a week and not a failure.
+        """
+        from googleapiclient.errors import HttpError
+
+        added: list[str] = []
+        seen: set[str] = set()
+        page_token = None
+        newest = start_history_id
+
+        while True:
+            try:
+                response = _retrying(
+                    lambda: self.service.users()
+                    .history()
+                    .list(
+                        userId="me",
+                        startHistoryId=start_history_id,
+                        # Deletions and label changes are not what this index
+                        # tracks; asking for them only makes the response bigger.
+                        historyTypes=["messageAdded"],
+                        pageToken=page_token,
+                    )
+                    .execute(),
+                    what="users.history.list",
+                )
+            except HttpError as exc:
+                if exc.resp.status == 404:
+                    raise HistoryTooOld(
+                        f"Gmail has expired history id {start_history_id}"
+                    ) from exc
+                raise
+
+            newest = str(response.get("historyId", newest))
+            for record in response.get("history", []):
+                for item in record.get("messagesAdded", []):
+                    message_id = item.get("message", {}).get("id")
+                    if message_id and message_id not in seen:
+                        seen.add(message_id)
+                        added.append(message_id)
+
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                return added, newest
+
+    def fetch_ids(self, message_ids: Iterable[str], *, skip=None) -> Iterator[RawMessage]:
+        """Fetch specific messages by id, for the incremental path.
+
+        ``fetch`` discovers ids by listing; here they are already known, so the
+        listing — the expensive half — is skipped entirely.
+        """
+        self.listed = 0
+        self.dropped = []
+        self.skipped_known = 0
+        for message_id in message_ids:
+            self.listed += 1
+            if skip is not None and skip(message_id):
+                self.skipped_known += 1
+                continue
+            message = self._get_one(message_id)
+            if message is not None:
+                yield message
+
+    def _get_one(self, message_id: str) -> RawMessage | None:
+        messages = self.service.users().messages()
+        try:
+            payload = _retrying(
+                lambda: messages.get(userId="me", id=message_id, format="raw").execute(),
+                what=f"messages.get {message_id}",
+            )
+        except Exception as exc:
+            log.error("skipping %s: %s", message_id, exc)
+            self.dropped.append((message_id, str(exc)))
+            return None
+
+        raw = payload.get("raw")
+        if not raw:
+            log.error("skipping %s: no raw payload", message_id)
+            self.dropped.append((message_id, "no raw payload"))
+            return None
+
+        return RawMessage(
+            source_uid=message_id,
+            raw=base64.urlsafe_b64decode(raw),
+            meta={
+                "thread_uid": payload.get("threadId"),
+                "labels": payload.get("labelIds", []),
+                "internal_date": payload.get("internalDate"),
+                "history_id": payload.get("historyId"),
+                "size_estimate": payload.get("sizeEstimate"),
+            },
+        )
 
     def list_ids(
         self, query: str, limit: int | None = None, on_page=None

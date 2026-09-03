@@ -24,11 +24,13 @@ export function Footer({
   mode,
   error,
   reading,
+  syncing,
 }: {
   response: SearchResponse | null;
   mode: Mode;
   error: string | null;
   reading: boolean;
+  syncing: boolean;
 }) {
   return (
     <footer className="footer">
@@ -55,6 +57,9 @@ export function Footer({
             <span className="dim">{response.results.length} results · {response.took_ms}ms</span>
           </>
         ) : null}
+        {/* Deliberately small and unlabelled-until-hovered: a refresh happens
+            on every summon and must not read as something needing attention. */}
+        {syncing && <span className="syncing" title="checking for new mail" />}
         <span className="mode">{mode}</span>
       </div>
     </footer>

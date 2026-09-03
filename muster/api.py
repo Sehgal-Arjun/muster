@@ -6,9 +6,13 @@ change a ranking belongs in the library, behind the eval harness, where it can
 be measured. If a query behaves differently here than through the CLI, that is
 a bug in this file.
 
-Read-only by design. Sync, embed, reparse and purge stay on the command line:
-they run for hours and mutate an archive that is expensive to rebuild, and a
-button that silently starts a two-hour backfill is a mistake waiting to happen.
+Read-only but for one endpoint. ``POST /sync/refresh`` pulls new mail and
+nothing else; embed, reparse and purge stay on the command line, because they
+run for hours and destroy work, and a button that silently starts a two-hour
+backfill is a mistake waiting to happen. Pulling new mail is neither: it is
+bounded by what has arrived, and the panel being able to ask for it is the
+difference between an index that is current and one the user has to remember to
+update.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -40,6 +44,42 @@ DEFAULT_PORT = 8765
 SCORE_SCALES = {"keyword": "bm25", "vector": "cosine", "hybrid": "rrf"}
 
 _local = threading.local()
+
+# Sync jobs started through the API. In-process and deliberately not persisted:
+# a job is only interesting while the panel that asked for it is still open, and
+# the lock — not this dict — is what actually stops two syncs colliding.
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+
+
+def _run_sync_job(cfg: Config, job_id: str) -> None:
+    """Run one incremental sync on a worker thread."""
+    from muster import incremental
+    from muster.connectors.gmail import GmailConnector
+    from muster.locking import LockHeld, sync_lock
+
+    state, result, error = "done", None, None
+    # Its own connection: sqlite3 objects are not shareable across threads, and
+    # this one writes.
+    conn = None
+    try:
+        with sync_lock(cfg.lock_path):
+            conn = db.connect(cfg.db_path)
+            connector = GmailConnector(cfg.gmail.credentials_path, cfg.gmail.token_path)
+            outcome = incremental.sync(conn, cfg, connector)
+            result = outcome.summary()
+    except LockHeld:
+        # The scheduled job got there first. Nothing went wrong.
+        state, result = "skipped", "another sync is already running"
+    except Exception as exc:  # noqa: BLE001 — surfaced to the caller, not raised
+        log.exception("sync job %s failed", job_id)
+        state, error = "failed", str(exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+    with _jobs_lock:
+        _jobs[job_id].update(state=state, result=result, error=error)
 
 
 class ApiError(Exception):
@@ -198,7 +238,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         # The Tauri shell and a browser during development. Nothing else: this
         # serves an entire personal mailbox with no authentication.
         allow_origin_regex=r"^(tauri://localhost|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?)$",
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
 
@@ -382,6 +422,47 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if range_header:
             return _partial(data, range_header, mime, headers)
         return Response(content=data, media_type=mime, headers=headers)
+
+    @app.post("/sync/refresh")
+    def sync_refresh(background: BackgroundTasks) -> dict:
+        """Start an incremental sync and return immediately.
+
+        The one write this API has. It is narrow on purpose: it can only pull
+        new mail, and it cannot purge, reparse or re-embed — those run for hours
+        and destroy work, and a button that starts them silently is a mistake
+        waiting to happen.
+
+        Never blocks. The panel calls this when it opens, and a search box that
+        waits on the network to become usable is worse than a stale index.
+        """
+        with _jobs_lock:
+            running = next(
+                (j for j in _jobs.values() if j["state"] == "running"), None
+            )
+            # Already syncing: hand back the job in flight rather than queueing
+            # a second one behind it.
+            if running:
+                return {"job": running["id"], "state": "running", "started": False}
+            job_id = f"sync-{len(_jobs) + 1}-{int(time.time())}"
+            _jobs[job_id] = {
+                "id": job_id, "state": "running", "started_at": time.time(),
+                "result": None, "error": None,
+            }
+        background.add_task(_run_sync_job, cfg, job_id)
+        return {"job": job_id, "state": "running", "started": True}
+
+    @app.get("/sync/jobs/{job_id}")
+    def sync_job(job_id: str) -> dict:
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            if job is None:
+                raise ApiError(404, "not_found", f"No sync job {job_id}.")
+            return {
+                "job": job["id"],
+                "state": job["state"],
+                "result": job["result"],
+                "error": job["error"],
+            }
 
     @app.get("/status")
     def status(conn: sqlite3.Connection = Depends(connection)) -> dict:

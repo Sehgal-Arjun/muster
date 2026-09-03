@@ -409,3 +409,18 @@ img.doc-embed { height: auto; max-height: 420px; object-fit: contain; }
   font: inherit;
   padding: 0 0 0 6px;
 }
+
+/* A refresh runs on most summons, so this reports rather than announces:
+   no label, no motion beyond a slow pulse, nothing to dismiss. */
+.syncing {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.8;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.9; }
+}

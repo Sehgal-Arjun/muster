@@ -89,3 +89,22 @@ class SenderFilter:
         if not clauses:
             return "0", {}
         return "(" + " OR ".join(clauses) + ")", params
+
+
+def excluded_by_sender(raw: bytes, sender_filter: "SenderFilter") -> bool:
+    """Whether a raw message is from an excluded sender.
+
+    Reads just the From header rather than parsing the whole message: sync
+    throws these away before anything is stored, so paying for a full MIME parse
+    of mail we are about to discard would be the wrong order of work.
+    """
+    import email
+    import email.policy
+    import email.utils
+
+    try:
+        head = email.message_from_bytes(raw[:8192], policy=email.policy.default)
+        addresses = [a for _n, a in email.utils.getaddresses([head.get("From") or ""]) if a]
+    except Exception:  # noqa: BLE001 — an unreadable header is not an exclusion
+        return False
+    return sender_filter.match(addresses) is not None

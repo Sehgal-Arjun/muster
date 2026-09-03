@@ -276,6 +276,37 @@ does. `?download=1` switches to `Content-Disposition: attachment`.
 
 ---
 
+## `POST /sync/refresh`
+
+The one endpoint that writes. Starts an incremental Gmail sync and returns
+immediately:
+
+```json
+{ "job": "sync-1-1775000000", "state": "running", "started": true }
+```
+
+`started` is `false` when a sync was already in flight — the job in flight is
+returned rather than a second one queued behind it. Poll it:
+
+```
+GET /sync/jobs/{job}
+{ "job": "sync-1-…", "state": "done", "result": "incremental: 3 indexed, 7 chunks", "error": null }
+```
+
+`state` is `running`, `done`, `skipped` or `failed`. `skipped` means the
+scheduled job holds the sync lock, which is not an error. `result` is the same
+one-line summary `muster sync --incremental` prints.
+
+It can only pull new mail. Embed, reparse and purge stay on the command line:
+they run for hours and destroy work, and a button that starts them silently is a
+mistake waiting to happen. Pulling mail is neither — it is bounded by what has
+arrived.
+
+The panel calls this when it opens, at most once every two minutes, and never
+waits on it.
+
+---
+
 ## `GET /status`
 
 Same numbers as `muster status`, for the UI's footer and empty state.

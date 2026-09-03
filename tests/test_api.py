@@ -406,3 +406,64 @@ def test_doc_provenance_reports_a_files_path_and_where_it_came_from(client, conn
     assert provenance["path"] == "/Users/x/Downloads/lease.pdf"
     assert provenance["where_from"] == ["https://example.com/lease.pdf"]
     assert provenance["size_bytes"] == 8192
+
+
+# --- POST /sync/refresh ---------------------------------------------------
+
+
+def test_refresh_returns_a_job_immediately(client, monkeypatch) -> None:
+    """The panel calls this on open; it must never make the box wait."""
+    import muster.api as api_module
+
+    started = []
+
+    def fake_job(cfg, job_id):
+        started.append(job_id)
+        with api_module._jobs_lock:
+            api_module._jobs[job_id].update(state="done", result="incremental: nothing new")
+
+    monkeypatch.setattr(api_module, "_run_sync_job", fake_job)
+    api_module._jobs.clear()
+
+    body = client.post("/sync/refresh").json()
+    assert body["state"] == "running"
+    assert body["started"] is True
+    assert started == [body["job"]]
+
+    status = client.get(f"/sync/jobs/{body['job']}").json()
+    assert status["state"] == "done"
+    assert status["result"] == "incremental: nothing new"
+
+
+def test_refresh_does_not_queue_a_second_sync(client, monkeypatch) -> None:
+    """Two open panels must not mean two syncs racing on one database."""
+    import muster.api as api_module
+
+    monkeypatch.setattr(api_module, "_run_sync_job", lambda cfg, job_id: None)
+    api_module._jobs.clear()
+
+    first = client.post("/sync/refresh").json()
+    second = client.post("/sync/refresh").json()
+
+    assert second["job"] == first["job"]
+    assert second["started"] is False
+
+
+def test_unknown_job_is_a_404(client) -> None:
+    assert client.get("/sync/jobs/nope").status_code == 404
+
+
+def test_a_held_lock_is_reported_as_skipped_not_failed(client, cfg, monkeypatch) -> None:
+    """The scheduled job getting there first is not an error."""
+    import muster.api as api_module
+    from muster.locking import sync_lock
+
+    api_module._jobs.clear()
+    with sync_lock(cfg.lock_path):
+        api_module._jobs["j1"] = {
+            "id": "j1", "state": "running", "started_at": 0, "result": None, "error": None,
+        }
+        api_module._run_sync_job(cfg, "j1")
+
+    assert api_module._jobs["j1"]["state"] == "skipped"
+    assert api_module._jobs["j1"]["error"] is None

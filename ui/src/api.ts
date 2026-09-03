@@ -149,6 +149,15 @@ export interface StatusResponse {
   corpus_fingerprint: string;
 }
 
+export interface SyncJob {
+  job: string;
+  state: "running" | "done" | "skipped" | "failed";
+  /** Present once finished: the same one-line summary the CLI prints. */
+  result?: string | null;
+  error?: string | null;
+  started?: boolean;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly code: string,
@@ -160,6 +169,24 @@ export class ApiError extends Error {
 }
 
 const BASE = import.meta.env.VITE_MUSTER_API ?? "http://127.0.0.1:8765";
+
+async function post<T>(path: string): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(new URL(path, BASE), { method: "POST" });
+  } catch {
+    throw new ApiError("unreachable", `No server at ${BASE}. Run \`muster serve\`.`, 0);
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new ApiError(
+      body?.error?.code ?? "http_error",
+      body?.error?.message ?? `${response.status} ${response.statusText}`,
+      response.status,
+    );
+  }
+  return (await response.json()) as T;
+}
 
 async function get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
   const url = new URL(path, BASE);
@@ -202,6 +229,10 @@ export const api = {
   }) => get<SearchResponse>("/search", params),
 
   doc: (id: number) => get<DocResponse>(`/doc/${id}`),
+
+  /** Start an incremental sync. Returns at once; poll syncJob for the outcome. */
+  refresh: () => post<SyncJob>("/sync/refresh"),
+  syncJob: (id: string) => get<SyncJob>(`/sync/jobs/${id}`),
   status: () => get<StatusResponse>("/status"),
   blobUrl: (hash: string, download = false) =>
     `${BASE}/blob/${hash}${download ? "?download=1" : ""}`,

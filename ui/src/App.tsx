@@ -17,6 +17,14 @@ const USE_MOCK = import.meta.env.VITE_USE_MOCK === "1";
 
 const MODES: Mode[] = ["hybrid", "keyword", "vector"];
 const DEBOUNCE_MS = 120;
+/**
+ * The panel opens far more often than mail arrives, so asking on every summon
+ * would spend a network round trip to learn nothing. Fifteen minutes is the
+ * scheduled interval; two is short enough that a summon after a quiet spell
+ * still gets fresh mail, and long enough that reopening the panel four times in
+ * a minute costs one request.
+ */
+const REFRESH_EVERY_MS = 2 * 60 * 1000;
 
 export default function App() {
   const [query, setQuery] = useState("");
@@ -37,6 +45,45 @@ export default function App() {
    * way out to the list.
    */
   const [stack, setStack] = useState<View[]>([]);
+  const [syncing, setSyncing] = useState(false);
+  // When the last refresh was asked for, so summoning the panel repeatedly does
+  // not mean a request each time.
+  const lastRefresh = useRef(0);
+
+  /**
+   * Ask the server to pull new mail. Never awaited by anything the user is
+   * waiting on — a search box that blocks on the network to become usable is
+   * worse than an index that is a few minutes stale.
+   */
+  const refresh = useCallback(async () => {
+    if (USE_MOCK) return;
+    const now = Date.now();
+    if (now - lastRefresh.current < REFRESH_EVERY_MS) return;
+    lastRefresh.current = now;
+    try {
+      const job = await api.refresh();
+      if (job.state !== "running") return;
+      setSyncing(true);
+      // Polled rather than pushed: the indicator is decoration, and a websocket
+      // for it would be more machinery than the thing it reports on.
+      const poll = setInterval(async () => {
+        try {
+          const status = await api.syncJob(job.job);
+          if (status.state !== "running") {
+            clearInterval(poll);
+            setSyncing(false);
+          }
+        } catch {
+          clearInterval(poll);
+          setSyncing(false);
+        }
+      }, 1500);
+    } catch {
+      // The server being down is already visible on the next search; a failed
+      // background refresh should not put an error over the results.
+      setSyncing(false);
+    }
+  }, []);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
@@ -80,6 +127,7 @@ export default function App() {
       setResponse(null);
       setStack([]);
       focus();
+      void refresh();
     };
     // Only focus, not clear: regaining focus by clicking the panel back to the
     // front should not throw away what is already typed in it.
@@ -87,11 +135,13 @@ export default function App() {
     const unlisten = import("@tauri-apps/api/event").then(({ listen }) =>
       listen("muster://shown", summoned),
     );
+    // The first summon is the mount, which fires no event.
+    void refresh();
     return () => {
       window.removeEventListener("focus", focus);
       void unlisten.then((stop) => stop());
     };
-  }, []);
+  }, [refresh]);
 
   useEffect(() => {
     if (USE_MOCK) {
@@ -380,7 +430,7 @@ export default function App() {
         )}
       </div>
 
-      <Footer response={response} mode={mode} error={error} reading={stack.length > 0} />
+      <Footer response={response} mode={mode} error={error} reading={reading} syncing={syncing} />
 
       {showActions && (
         <Actions hit={current} actions={actions} onClose={() => setShowActions(false)} />

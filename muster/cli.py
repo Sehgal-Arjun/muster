@@ -20,8 +20,155 @@ app = typer.Typer(
     add_completion=False,
 )
 
-sync_app = typer.Typer(name="sync", help="Pull messages from a source.", no_args_is_help=True)
+# invoke_without_command so `muster sync --incremental` is a command in its own
+# right: the routine case deserves the short spelling, and naming a provider to
+# ask "anything new?" is ceremony.
+sync_app = typer.Typer(name="sync", help="Pull messages from a source.", invoke_without_command=True)
 app.add_typer(sync_app)
+
+schedule_app = typer.Typer(
+    name="schedule", help="Run the sync on a timer.", no_args_is_help=True
+)
+app.add_typer(schedule_app)
+
+
+@sync_app.callback()
+def _sync_root(
+    ctx: typer.Context,
+    incremental: Annotated[
+        bool,
+        typer.Option("--incremental", "-i", help="Only what arrived since the last sync."),
+    ] = False,
+) -> None:
+    if ctx.invoked_subcommand is not None:
+        if incremental:
+            typer.echo("--incremental applies to `muster sync`, not a subcommand", err=True)
+            raise typer.Exit(1)
+        return
+    if not incremental:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
+    _run_incremental(quiet=False)
+
+
+def _run_incremental(*, quiet: bool) -> int:
+    """One incremental Gmail pass. Returns the number of new documents."""
+    from muster import incremental, syncstate
+    from muster.connectors.gmail import GmailAuthError, GmailConnector
+    from muster.locking import LockHeld, sync_lock
+
+    cfg = load_config()
+    cfg.ensure_dirs()
+    _require_db(cfg)
+
+    conn = db.connect(cfg.db_path)
+    try:
+        with sync_lock(cfg.lock_path):
+            connector = GmailConnector(cfg.gmail.credentials_path, cfg.gmail.token_path)
+            outcome = incremental.sync(conn, cfg, connector)
+    except LockHeld:
+        typer.echo("another sync is already running; nothing to do")
+        return 0
+    except GmailAuthError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        conn.close()
+
+    if not quiet:
+        typer.echo(outcome.summary())
+    return outcome.counts.created
+
+
+@schedule_app.command("install")
+def schedule_install() -> None:
+    """Install the launchd agent that syncs every 15 minutes."""
+    from muster import scheduling
+
+    try:
+        path = scheduling.install()
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(
+        f"installed {path}\n"
+        f"  every {scheduling.INTERVAL_SECONDS // 60} minutes, at background priority\n"
+        f"  skipped on battery below {scheduling.BATTERY_FLOOR_PERCENT}%\n"
+        f"  logs {scheduling.log_dir() / 'sync.log'}\n"
+        "  it will not wake the machine; it runs on the next wake instead"
+    )
+
+
+@schedule_app.command("uninstall")
+def schedule_uninstall() -> None:
+    """Remove the scheduled sync."""
+    from muster import scheduling
+
+    if scheduling.uninstall():
+        typer.echo("removed the scheduled sync")
+    else:
+        typer.echo("no scheduled sync was installed")
+
+
+@schedule_app.command("run")
+def schedule_run() -> None:
+    """One scheduled pass. This is what launchd calls; it is safe to run by hand."""
+    from muster import scheduling
+    from muster.locking import LockHeld, sync_lock
+
+    cfg = load_config()
+    power = scheduling.power()
+    if power.too_low:
+        typer.echo(f"skipped: on battery at {power.percent}%")
+        return
+
+    try:
+        with sync_lock(cfg.lock_path):
+            pass
+    except LockHeld:
+        # Not a failure. A backfill that runs for hours would otherwise have a
+        # new run stacked on it every fifteen minutes.
+        typer.echo("skipped: another sync holds the lock")
+        return
+
+    created = _run_incremental(quiet=False)
+
+    # Embedding is minutes of GPU for nothing when there is nothing new, so the
+    # scheduled job only pays for it when the sync actually produced chunks.
+    if created:
+        from muster.embed import count_pending
+
+        conn = db.connect(cfg.db_path)
+        try:
+            pending = count_pending(conn, cfg.embed.model_id)
+        finally:
+            conn.close()
+        if pending:
+            typer.echo(f"embedding {pending} new chunks")
+            _embed_pending(cfg)
+        else:
+            typer.echo("no chunks awaiting vectors")
+
+
+def _embed_pending(cfg) -> None:
+    """Embed whatever is waiting.
+
+    Calls the library rather than the `embed` command: invoking a Typer command
+    as a function hands it the OptionInfo defaults instead of their values.
+    """
+    from muster.embed import embed_pending
+
+    conn = db.connect(cfg.db_path)
+    try:
+        report = embed_pending(
+            conn,
+            cfg.embed.model_id,
+            device=cfg.embed.device,
+            batch_size=cfg.embed.batch_size,
+        )
+        typer.echo(f"embedded {report.embedded} chunks")
+    finally:
+        conn.close()
 
 corpus_app = typer.Typer(
     name="corpus", help="Freeze and inspect eval corpora.", no_args_is_help=True
@@ -158,7 +305,7 @@ def status(
     if senders:
         typer.echo(f"\nby sender (top {len(sender_rows)})")
         typer.echo(f"  {'docs':>7}{'chunks':>9}  {'excl':<5}sender")
-        from muster.senders import SenderFilter
+        from muster.senders import SenderFilter, excluded_by_sender
 
         active = SenderFilter(cfg.excluded_senders)
         for sender, docs_n, chunks_n in sender_rows:
@@ -177,24 +324,6 @@ def status(
             dup = docs_n - distinct_n
             flag = typer.style(f"{dup:>5}", fg="yellow") if dup else f"{dup:>5}"
             typer.echo(f"  {month or '?':<10}{docs_n:>7}{distinct_n:>10}{threads_n:>9}{flag}")
-
-
-def _sender_excluded(raw: bytes, sender_filter) -> bool:
-    """Read just the From header, without parsing the whole message.
-
-    Sync throws these away before anything is stored, so paying for a full MIME
-    parse of mail we are about to discard would be the wrong order of work.
-    """
-    import email
-    import email.policy
-    import email.utils
-
-    try:
-        head = email.message_from_bytes(raw[:8192], policy=email.policy.default)
-        addresses = [a for _n, a in email.utils.getaddresses([head.get("From") or ""]) if a]
-    except Exception:
-        return False
-    return sender_filter.match(addresses) is not None
 
 
 def _require_db(cfg):
@@ -220,7 +349,7 @@ def _drain(
     from muster.categories import is_excluded
     from muster.ingest import ingest_message
     from muster.redaction import Redactor
-    from muster.senders import SenderFilter
+    from muster.senders import SenderFilter, excluded_by_sender
 
     conn = db.connect(cfg.db_path)
     store = BlobStore(cfg.blob_dir)
@@ -258,7 +387,7 @@ def _drain(
             ):
                 filtered += 1
                 continue
-            if sender_filter and _sender_excluded(message.raw, sender_filter):
+            if sender_filter and excluded_by_sender(message.raw, sender_filter):
                 by_sender += 1
                 continue
             try:
@@ -610,7 +739,7 @@ def purge(
     """Remove documents from the index. Blobs are kept; originals are immutable."""
     from muster.purge import plan as purge_plan
     from muster.purge import purge as run_purge
-    from muster.senders import SenderFilter
+    from muster.senders import SenderFilter, excluded_by_sender
 
     cfg = load_config()
     _require_db(cfg)
@@ -685,7 +814,7 @@ def reparse(
     """
     from muster.redaction import Redactor
     from muster.reparse import reparse as run_reparse
-    from muster.senders import SenderFilter
+    from muster.senders import SenderFilter, excluded_by_sender
 
     cfg = load_config()
     _require_db(cfg)
