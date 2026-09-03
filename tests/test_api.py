@@ -327,3 +327,82 @@ def test_the_api_ranks_identically_to_the_library(client, conn) -> None:
             ).json()["results"]
         ]
         assert via_http == direct, mode
+
+
+# --- /doc: what a reader needs that a ranker does not ---------------------
+
+
+def test_doc_exposes_recipients_from_the_stored_headers(client, conn) -> None:
+    """counterparty is one address picked for ranking, not the To header."""
+    doc_id = conn.execute(
+        "SELECT id FROM docs WHERE source_uid = 'ordinary-1@example.com'"
+    ).fetchone()[0]
+    body = client.get(f"/doc/{doc_id}").json()
+
+    assert isinstance(body["recipients"]["to"], list)
+    assert isinstance(body["recipients"]["cc"], list)
+    assert body["recipients"]["to"], "a delivered message was addressed to somebody"
+
+
+def test_doc_thread_is_null_for_a_conversation_of_one(client, conn) -> None:
+    """A thread containing only this message is not context, it is the message."""
+    row = conn.execute(
+        "SELECT id FROM docs WHERE thread_uid IS NOT NULL"
+        " GROUP BY thread_uid HAVING count(*) = 1 LIMIT 1"
+    ).fetchone()
+    if row is None:
+        pytest.skip("fixture has no single-message thread")
+    assert client.get(f"/doc/{row[0]}").json()["thread"] is None
+
+
+def test_doc_thread_lists_siblings_oldest_first_and_marks_the_current(client, conn) -> None:
+    row = conn.execute(
+        "SELECT thread_uid FROM docs WHERE thread_uid IS NOT NULL AND origin = 'captured'"
+        " GROUP BY thread_uid HAVING count(*) > 1 LIMIT 1"
+    ).fetchone()
+    if row is None:
+        pytest.skip("fixture has no multi-message thread")
+    doc_id = conn.execute(
+        "SELECT id FROM docs WHERE thread_uid = ? ORDER BY doc_date LIMIT 1", (row[0],)
+    ).fetchone()[0]
+
+    thread = client.get(f"/doc/{doc_id}").json()["thread"]
+    assert thread["count"] >= 2
+    dates = [m["date"] for m in thread["messages"]]
+    assert dates == sorted(dates)
+    assert [m["current"] for m in thread["messages"]].count(True) == 1
+
+
+def test_doc_provenance_is_absent_for_mail(client, conn) -> None:
+    """Mail has no path and no download; the block should not be invented."""
+    doc_id = conn.execute(
+        "SELECT id FROM docs WHERE mime = 'message/rfc822' LIMIT 1"
+    ).fetchone()[0]
+    assert client.get(f"/doc/{doc_id}").json()["provenance"] is None
+
+
+def test_doc_provenance_reports_a_files_path_and_where_it_came_from(client, conn) -> None:
+    """The Spotlight fields are the join from a download back to its message."""
+    import json
+
+    doc_id = conn.execute("SELECT id FROM docs LIMIT 1").fetchone()[0]
+    conn.execute(
+        "UPDATE docs SET meta_json = ? WHERE id = ?",
+        (
+            json.dumps(
+                {
+                    "path": "/Users/x/Downloads/lease.pdf",
+                    "where_from": ["https://example.com/lease.pdf"],
+                    "downloaded_date": "2026-03-04T10:00:00Z",
+                    "size": 8192,
+                }
+            ),
+            doc_id,
+        ),
+    )
+    conn.commit()
+
+    provenance = client.get(f"/doc/{doc_id}").json()["provenance"]
+    assert provenance["path"] == "/Users/x/Downloads/lease.pdf"
+    assert provenance["where_from"] == ["https://example.com/lease.pdf"]
+    assert provenance["size_bytes"] == 8192

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api, type Hit, type Mode, type SearchResponse } from "./api";
 import { mockSearchFor, mockStatus } from "./mock";
 import { Actions, type Action } from "./components/Actions";
+import { DocView, type View } from "./components/DocView";
 import { EmptyState } from "./components/EmptyState";
 import { Footer } from "./components/Footer";
 import { ResultRow } from "./components/ResultRow";
@@ -28,14 +29,27 @@ export default function App() {
   // Needed to turn a content hash into a path Finder can reveal. Fetched once;
   // a search should never wait on it.
   const [blobDir, setBlobDir] = useState<string | null>(null);
+  /**
+   * What is showing instead of the results, innermost last.
+   *
+   * A stack rather than a single view, so following a message to its PDF
+   * attachment and pressing escape goes back to the message rather than all the
+   * way out to the list.
+   */
+  const [stack, setStack] = useState<View[]>([]);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  // Where the list was when the reader left it. Restored on the way back, so
+  // returning from a document does not silently scroll them to the top.
+  const listScroll = useRef(0);
   // Guards against a slow response for an old query overwriting a fast one for
   // the query the user is actually looking at.
   const latest = useRef(0);
 
   const hits = response?.results ?? [];
+  const reading = stack.length > 0;
   const current: Hit | null = hits[selected] ?? null;
 
   useEffect(() => inputRef.current?.focus(), []);
@@ -64,6 +78,7 @@ export default function App() {
       // back still holding the last query and its results.
       setQuery("");
       setResponse(null);
+      setStack([]);
       focus();
     };
     // Only focus, not clear: regaining focus by clicking the panel back to the
@@ -126,6 +141,7 @@ export default function App() {
     // whatever was left behind.
     setQuery("");
     setResponse(null);
+    setStack([]);
     if (USE_MOCK) return;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -136,6 +152,36 @@ export default function App() {
       setError(`Could not close the panel: ${cause}`);
     }
   }, []);
+
+  /** Read a document inside the panel. */
+  const read = useCallback((hit: Hit | null) => {
+    if (!hit) return;
+    listScroll.current = resultsRef.current?.scrollTop ?? 0;
+    setStack([{ kind: "doc", id: hit.doc_id }]);
+  }, []);
+
+  const back = useCallback(() => {
+    setStack((current) => current.slice(0, -1));
+  }, []);
+
+  /**
+   * The query field gives up focus while a document is open.
+   *
+   * It stays on screen as context, but if it kept focus then j, k and c would
+   * be typed into it as well as acted on — the reader would scroll and edit
+   * their query at the same time.
+   */
+  useEffect(() => {
+    if (reading) inputRef.current?.blur();
+    else inputRef.current?.focus();
+  }, [reading]);
+
+  // Restore the list exactly where it was, once it is on screen again.
+  useEffect(() => {
+    if (stack.length === 0 && resultsRef.current) {
+      resultsRef.current.scrollTop = listScroll.current;
+    }
+  }, [stack.length]);
 
   /** Open the original in whatever handles its type. */
   const open = useCallback(
@@ -177,8 +223,11 @@ export default function App() {
   const actions: Action[] = useMemo(() => {
     if (!current) return [];
     const list: Action[] = [
-      { id: "open", label: "Open original", hint: "↵", run: () => open(current) },
+      { id: "read", label: "Read here", hint: "↵", run: () => read(current) },
       { id: "reveal", label: "Reveal in Finder", hint: "⌘↵", run: () => reveal(current) },
+      // Still offered: reading it here is the default, not a replacement for
+      // whatever the reader actually wants to do with the file.
+      { id: "open", label: "Open in default app", run: () => open(current) },
       {
         id: "copy-title",
         label: "Copy subject",
@@ -205,7 +254,7 @@ export default function App() {
       });
     }
     return list;
-  }, [current, open, reveal]);
+  }, [current, open, reveal, read]);
 
   /**
    * Escape lives on the document, not on the container below.
@@ -223,14 +272,23 @@ export default function App() {
       // The actions palette owns Escape while it is open: it should close on
       // its own without taking the panel with it.
       if (showActions) return;
+      // Reading something? Escape is "back", not "close". Only a reader who is
+      // already looking at the results means dismiss.
+      if (stack.length) {
+        back();
+        return;
+      }
       void hide();
     };
     document.addEventListener("keydown", onEscape);
     return () => document.removeEventListener("keydown", onEscape);
-  }, [showActions, hide]);
+  }, [showActions, hide, stack.length, back]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (showActions) return;
+    // The document view binds its own keys — j/k, enter into an attachment,
+    // copy — and they mean different things there than they do over a list.
+    if (stack.length) return;
     const meta = event.metaKey || event.ctrlKey;
 
     if (event.key === "ArrowDown") {
@@ -241,7 +299,9 @@ export default function App() {
       setSelected((i) => Math.max(i - 1, 0));
     } else if (event.key === "Enter") {
       event.preventDefault();
-      void (meta ? reveal(current) : open(current));
+      // Enter reads it here. Leaving the panel to open Gmail or Preview is the
+      // failure this view exists to remove; ⌘↵ still reveals the original.
+      void (meta ? reveal(current) : read(current));
     } else if (meta && event.key.toLowerCase() === "k") {
       event.preventDefault();
       if (current) setShowActions(true);
@@ -260,6 +320,7 @@ export default function App() {
           placeholder="Search everything you have ever received…"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
+          readOnly={reading}
           spellCheck={false}
           autoComplete="off"
         />
@@ -270,7 +331,17 @@ export default function App() {
         )}
       </div>
 
-      <div className="results">
+      <div className={`results${reading ? " reading" : ""}`} ref={resultsRef}>
+        {reading ? (
+          <DocView
+            view={stack[stack.length - 1]!}
+            query={query}
+            blobDir={blobDir}
+            onOpen={(next) => setStack((current) => [...current, next])}
+            onExit={back}
+          />
+        ) : (
+        <>
         {hits.length > 0 && (
           <ul className="rows" ref={listRef} role="listbox">
             {hits.map((hit, i) => (
@@ -305,9 +376,11 @@ export default function App() {
             </div>
           </div>
         )}
+        </>
+        )}
       </div>
 
-      <Footer response={response} mode={mode} error={error} />
+      <Footer response={response} mode={mode} error={error} reading={stack.length > 0} />
 
       {showActions && (
         <Actions hit={current} actions={actions} onClose={() => setShowActions(false)} />

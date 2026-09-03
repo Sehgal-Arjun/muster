@@ -323,8 +323,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "mime": row["mime"],
             "category": row["category"],
             "sender": _sender(row["sender_name"], row["sender"]),
+            "recipients": _recipients(meta),
             "counterparty": row["counterparty"],
             "thread_uid": row["thread_uid"],
+            "thread": _thread(conn, row),
+            "provenance": _provenance(row, meta),
             "text": text,
             "chunk_count": chunk_count,
             "redacted_by": meta.get("redacted_by"),
@@ -461,6 +464,83 @@ def _meta(row: sqlite3.Row) -> dict:
         return json.loads(row["meta_json"]) if row["meta_json"] else {}
     except (TypeError, ValueError):
         return {}
+
+
+def _recipients(meta: dict) -> dict[str, list[str]]:
+    """Who it was addressed to, out of the stored headers.
+
+    A reader needs to see whether a message was addressed to them or to three
+    hundred people, and that is not derivable from ``counterparty`` — which is
+    one address chosen for ranking, not the header.
+    """
+
+    def addresses(key: str) -> list[str]:
+        value = meta.get(key)
+        return [str(a) for a in value if a] if isinstance(value, list) else []
+
+    return {"to": addresses("to"), "cc": addresses("cc")}
+
+
+# A thread is context, not a mailbox: enough to see where a message sits in a
+# conversation, capped so one runaway list cannot make the response enormous.
+THREAD_LIMIT = 50
+
+
+def _thread(conn: sqlite3.Connection, row: sqlite3.Row) -> dict | None:
+    """The other messages in this conversation, oldest first."""
+    if not row["thread_uid"]:
+        return None
+
+    siblings = conn.execute(
+        "SELECT id, title, doc_date, sender, sender_name FROM docs"
+        " WHERE thread_uid = ? AND origin = 'captured'"
+        " ORDER BY doc_date LIMIT ?",
+        (row["thread_uid"], THREAD_LIMIT),
+    ).fetchall()
+
+    # A conversation of one is the message itself, which the caller already has.
+    if len(siblings) < 2:
+        return None
+
+    return {
+        "uid": row["thread_uid"],
+        "count": len(siblings),
+        "messages": [
+            {
+                "doc_id": s["id"],
+                "title": s["title"],
+                "date": s["doc_date"],
+                "sender": _sender(s["sender_name"], s["sender"]),
+                "current": s["id"] == row["id"],
+            }
+            for s in siblings
+        ],
+    }
+
+
+def _provenance(row: sqlite3.Row, meta: dict) -> dict | None:
+    """Where a file came from, for documents that are files on disk.
+
+    ``where_from`` and ``downloaded_date`` are Spotlight's record of the
+    download, and they are the join back to the message that pointed at the
+    file. Absent for mail, which has no path and no download.
+    """
+    path = meta.get("path")
+    if not path:
+        return None
+
+    where_from = meta.get("where_from")
+    if isinstance(where_from, str):
+        where_from = [where_from]
+
+    return {
+        "path": str(path),
+        "where_from": [str(w) for w in where_from if w] if isinstance(where_from, list) else [],
+        "downloaded_date": meta.get("downloaded_date"),
+        "size_bytes": meta.get("size"),
+        "modified": meta.get("mtime"),
+        "created": meta.get("birthtime"),
+    }
 
 
 def _document_text(conn, store, row) -> tuple[str, int]:

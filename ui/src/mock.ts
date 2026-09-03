@@ -139,9 +139,28 @@ export const mockDoc: DocResponse = {
   mime: "message/rfc822",
   category: null,
   sender: { name: "Bob Fischer", address: "bob@example.com" },
+  recipients: { to: ["you@example.com"], cc: ["legal@example.com"] },
   counterparty: "bob@example.com",
   thread_uid: "19aa00bb11cc22dd",
-  text: "Confirming the warehouse lease renewal at 4200 EUR per month, starting 1 July 2026.",
+  thread: {
+    uid: "19aa00bb11cc22dd",
+    count: 3,
+    messages: [
+      { doc_id: 99, title: "Warehouse lease renewal", date: "2026-03-14T11:00:00+00:00",
+        sender: { name: "Sam", address: "you@example.com" }, current: false },
+      { doc_id: 101, title: "Warehouse lease renewal", date: "2026-03-16T09:14:00+00:00",
+        sender: { name: "Bob Fischer", address: "bob@example.com" }, current: true },
+      { doc_id: 104, title: "Re: Warehouse lease renewal", date: "2026-03-18T15:40:00+00:00",
+        sender: { name: "Sam", address: "you@example.com" }, current: false },
+    ],
+  },
+  provenance: null,
+  text:
+    "Hi,\n\nConfirming the warehouse lease renewal at 4200 EUR per month, " +
+    "starting 1 July 2026. The signed agreement is attached, along with the " +
+    "schedule of works.\n\nThe lease term runs for thirty-six months with a " +
+    "break clause at twenty-four. Rent is reviewed annually against CPI.\n\n" +
+    "Best,\nBob",
   chunk_count: 1,
   redacted_by: null,
   excluded_sender: null,
@@ -152,8 +171,52 @@ export const mockDoc: DocResponse = {
     url: "/blob/1111111111111111111111111111111111111111111111111111111111111111",
     filename: "Warehouse lease renewal.eml",
   },
-  attachments: [],
+  attachments: [
+    {
+      filename: "Lease-Agreement-2026.pdf",
+      mime: "application/pdf",
+      content_hash: "2222222222222222222222222222222222222222222222222222222222222222",
+      bytes: 918234,
+      url: "/blob/2222222222222222222222222222222222222222222222222222222222222222",
+      doc_id: 102,
+    },
+    {
+      filename: "signature.png",
+      mime: "image/png",
+      content_hash: "3333333333333333333333333333333333333333333333333333333333333333",
+      bytes: 4821,
+      url: "/blob/3333333333333333333333333333333333333333333333333333333333333333",
+      doc_id: null,
+    },
+  ],
   copies: [],
+};
+
+/** A file on disk, so the provenance block and its date sourcing are reachable. */
+export const mockFileDoc: DocResponse = {
+  ...mockDoc,
+  id: 102,
+  source: "file",
+  source_uid: "/Users/you/Downloads/Lease-Agreement-2026.pdf",
+  kind: "attachment",
+  title: "Lease-Agreement-2026.pdf",
+  date_source: "pdfmeta",
+  mime: "application/pdf",
+  sender: null,
+  recipients: { to: [], cc: [] },
+  thread: null,
+  provenance: {
+    path: "/Users/you/Downloads/Lease-Agreement-2026.pdf",
+    where_from: ["https://mail.google.com/", "https://example.com/lease.pdf"],
+    downloaded_date: "2026-03-16T09:20:00+00:00",
+    size_bytes: 918234,
+    modified: "2026-03-16T09:20:00+00:00",
+    created: "2026-03-16T09:20:00+00:00",
+  },
+  text:
+    "LEASE AGREEMENT\n\nThis warehouse lease is made between the parties named " +
+    "below for a term of thirty-six months commencing 1 July 2026.",
+  attachments: [],
 };
 
 export const mockStatus: StatusResponse = {

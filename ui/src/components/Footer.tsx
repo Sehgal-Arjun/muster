@@ -1,27 +1,39 @@
 import type { Mode, SearchResponse } from "../api";
 
-const HINTS: Array<[string, string]> = [
+const SEARCH_HINTS: Array<[string, string]> = [
   ["↑↓", "navigate"],
-  ["↵", "open"],
+  ["↵", "read"],
   ["⌘↵", "reveal in Finder"],
   ["⌘K", "actions"],
   ["⌘1/2/3", "mode"],
   ["esc", "close"],
 ];
 
+// Same keys, different meanings. Showing the search hints over a document
+// would be telling the reader the wrong thing.
+const READING_HINTS: Array<[string, string]> = [
+  ["↑↓ jk", "scroll"],
+  ["↵", "open attachment"],
+  ["⌘↵", "reveal in Finder"],
+  ["⌘C", "copy body"],
+  ["esc", "back"],
+];
+
 export function Footer({
   response,
   mode,
   error,
+  reading,
 }: {
   response: SearchResponse | null;
   mode: Mode;
   error: string | null;
+  reading: boolean;
 }) {
   return (
     <footer className="footer">
       <div className="hints">
-        {HINTS.map(([key, label]) => (
+        {(reading ? READING_HINTS : SEARCH_HINTS).map(([key, label]) => (
           <span key={key} className="hint">
             <kbd>{key}</kbd>
             {label}

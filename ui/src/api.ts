@@ -89,6 +89,26 @@ export interface Attachment {
   doc_id: number | null;
 }
 
+export interface ThreadMessage {
+  doc_id: number;
+  title: string | null;
+  date: string;
+  sender: { name: string | null; address: string | null } | null;
+  /** The message being viewed. Exactly one is true. */
+  current: boolean;
+}
+
+/** Where a file on disk came from. Null for mail, which has no path. */
+export interface Provenance {
+  path: string;
+  /** kMDItemWhereFroms — the URL, and often the page that linked to it. */
+  where_from: string[];
+  downloaded_date: string | null;
+  size_bytes: number | null;
+  modified: string | null;
+  created: string | null;
+}
+
 export interface DocResponse {
   id: number;
   source: string;
@@ -100,8 +120,11 @@ export interface DocResponse {
   mime: string | null;
   category: string | null;
   sender: { name: string | null; address: string | null } | null;
+  recipients: { to: string[]; cc: string[] };
   counterparty: string | null;
   thread_uid: string | null;
+  thread: { uid: string; count: number; messages: ThreadMessage[] } | null;
+  provenance: Provenance | null;
   text: string;
   chunk_count: number;
   redacted_by: string | null;

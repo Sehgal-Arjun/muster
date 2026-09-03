@@ -186,8 +186,20 @@ matches anyway, which is what the footer hint should offer.
   "mime": "message/rfc822",
   "category": null,
   "sender": { "name": "Dana Okonkwo", "address": "dana@example.com" },
+  "recipients": { "to": ["you@example.com"], "cc": [] },
   "counterparty": "landlord@example.com",
   "thread_uid": "19bb44cc55dd66ee",
+  "thread": {
+    "uid": "19bb44cc55dd66ee",
+    "count": 3,
+    "messages": [
+      { "doc_id": 5428, "title": "Credit reports and offer letters",
+        "date": "2025-07-29T09:00:00+00:00",
+        "sender": { "name": "Dana Okonkwo", "address": "dana@example.com" },
+        "current": false }
+    ]
+  },
+  "provenance": null,
   "text": "Hi, attached are the credit reports and offer letters…",
   "chunk_count": 3,
   "redacted_by": null,
@@ -213,6 +225,20 @@ matches what was indexed; for an attachment doc it is the extracted text.
 `attachments[].doc_id` is the attachment's own searchable document where one
 exists, and `null` where the file carried no text. Following it is how the UI
 gets from a message to the PDF the query actually matched.
+
+`recipients` comes from the stored headers. It is not `counterparty`, which is a
+single address chosen for ranking — a reader needs to know whether a message was
+addressed to them or to three hundred people, and that is not recoverable from
+one address.
+
+`thread` is context, not a mailbox: the conversation's messages oldest first,
+capped at 50, with `current` marking this one. It is `null` when the thread holds
+only this message, because a conversation of one is not context.
+
+`provenance` is present only for documents that are files on disk. `where_from`
+and `downloaded_date` are Spotlight's record of the download (`kMDItemWhereFroms`,
+`kMDItemDownloadedDate`) and are the join from a downloaded file back to the
+message that pointed at it. `null` for mail, which has neither.
 
 `redacted_by` non-null means the body was deliberately not indexed — a login
 code or magic link. `text` is empty and the title is masked. The UI should say
