@@ -42,6 +42,19 @@ class GmailConfig:
 
 
 @dataclass(frozen=True)
+class FilesConfig:
+    """Which parts of the disk are indexed.
+
+    Documents and Downloads only, by default and deliberately. A home directory
+    holds far more that is not a document than is, and the cost of indexing the
+    rest is paid on every walk forever.
+    """
+
+    roots: tuple[str, ...] = ("~/Documents", "~/Downloads")
+    max_bytes: int = 100 * 1024 * 1024
+
+
+@dataclass(frozen=True)
 class EmbedConfig:
     model_id: str = DEFAULT_EMBED_MODEL
     batch_size: int = 64
@@ -150,6 +163,7 @@ class Config:
     blob_dir: Path
     gmail: GmailConfig
     embed: EmbedConfig = field(default_factory=EmbedConfig)
+    files: FilesConfig = field(default_factory=FilesConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     redaction: RedactionConfig = field(default_factory=RedactionConfig)
     # Addresses ("notifications@github.com") or bare domains ("substack.com",
@@ -191,6 +205,7 @@ def load_config(home: Path | None = None) -> Config:
     storage = raw.get("storage", {})
     gmail = raw.get("gmail", {})
     embed = raw.get("embed", {})
+    files = raw.get("files", {})
     search = raw.get("search", {})
     redaction = raw.get("redaction", {})
 
@@ -208,6 +223,10 @@ def load_config(home: Path | None = None) -> Config:
             batch_size=int(embed.get("batch_size", 64)),
             device=embed.get("device"),
             prepend_title=bool(embed.get("prepend_title", False)),
+        ),
+        files=FilesConfig(
+            roots=tuple(str(r) for r in files.get("roots", FilesConfig.roots)),
+            max_bytes=int(files.get("max_bytes", FilesConfig.max_bytes)),
         ),
         search=SearchConfig(
             title_weight=float(search.get("title_weight", 1.0)),

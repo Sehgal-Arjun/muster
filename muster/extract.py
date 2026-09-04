@@ -27,6 +27,10 @@ TEXT_MIMES = {
 }
 PDF_MIMES = {"application/pdf", "application/x-pdf"}
 IMAGE_MIMES = {"image/png", "image/jpeg", "image/jpg", "image/tiff", "image/heic", "image/webp"}
+DOCX_MIMES = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+RTF_MIMES = {"application/rtf", "text/rtf"}
 
 
 def is_text_bearing(mime: str | None, filename: str | None) -> bool:
@@ -36,8 +40,12 @@ def is_text_bearing(mime: str | None, filename: str | None) -> bool:
         return True
     if mime.startswith("text/"):
         return True
+    if mime in DOCX_MIMES or mime in RTF_MIMES:
+        return True
     name = (filename or "").lower()
-    return name.endswith((".txt", ".md", ".csv", ".json", ".pdf", ".log"))
+    return name.endswith(
+        (".txt", ".md", ".csv", ".json", ".pdf", ".log", ".docx", ".rtf", ".pages")
+    )
 
 
 def extract_text(data: bytes, mime: str | None, filename: str | None) -> str:
@@ -46,6 +54,12 @@ def extract_text(data: bytes, mime: str | None, filename: str | None) -> str:
     try:
         if mime in PDF_MIMES or name.endswith(".pdf"):
             return extract_pdf(data)
+        if mime in DOCX_MIMES or name.endswith(".docx"):
+            return extract_docx(data)
+        if name.endswith(".pages"):
+            return extract_pages(data)
+        if mime in RTF_MIMES or name.endswith(".rtf"):
+            return extract_rtf(data)
         if mime in IMAGE_MIMES or name.endswith((".png", ".jpg", ".jpeg", ".tiff", ".heic")):
             return ocr_image_bytes(data)
         if mime in TEXT_MIMES or mime.startswith("text/") or name.endswith((".txt", ".md", ".csv", ".json", ".log")):
@@ -145,3 +159,150 @@ def ocr_image_bytes(data: bytes) -> str:
         return ""
 
     return "\n".join(text for text, _confidence, _box in results if text.strip())
+
+
+def extract_docx(data: bytes) -> str:
+    """Text from a .docx.
+
+    A .docx is a zip holding XML, so this needs no dependency: pull the document
+    part and take the text nodes. Paragraph and tab boundaries are turned into
+    whitespace first, because stripping tags without them welds the last word of
+    one paragraph to the first of the next and produces tokens that match nothing.
+    """
+    import io
+    import re
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            xml = archive.read("word/document.xml").decode("utf-8", "replace")
+    except (KeyError, zipfile.BadZipFile, OSError) as exc:
+        log.warning("not a readable docx: %s", exc)
+        return ""
+
+    xml = re.sub(r"</w:p>", "\n", xml)
+    xml = re.sub(r"<w:tab[^>]*/>", "\t", xml)
+    xml = re.sub(r"<w:br[^>]*/>", "\n", xml)
+    return _collapse_blank_lines(re.sub(r"<[^>]+>", "", xml))
+
+
+def extract_pages(data: bytes) -> str:
+    """Text from an Apple Pages document.
+
+    The document body is Apple's own binary IWA format, which is not worth
+    reimplementing. Pages bundles a PDF preview for Quick Look, and reading that
+    gets the text through a path already relied on for every other PDF.
+    """
+    import io
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            preview = next(
+                (
+                    name
+                    for name in archive.namelist()
+                    if name.lower().endswith(".pdf") and "preview" in name.lower()
+                ),
+                None,
+            )
+            if preview is None:
+                log.info("pages file has no preview pdf; nothing to extract")
+                return ""
+            return extract_pdf(archive.read(preview))
+    except (zipfile.BadZipFile, OSError) as exc:
+        log.warning("not a readable pages file: %s", exc)
+        return ""
+
+
+def extract_rtf(data: bytes) -> str:
+    """Text from RTF.
+
+    Hand-rolled rather than adding a dependency for a format that is mostly
+    braces and backslashes. A scanner rather than a set of regexes, because the
+    part that matters is nesting: font and colour tables are groups whose
+    *contents* must be skipped whole, and a pattern that cannot count braces
+    will leak "Helvetica" into the index as though it were body text.
+
+    Not a full RTF reader, and does not claim to be.
+    """
+    import re
+
+    text = data.decode("cp1252", "replace") if isinstance(data, bytes) else data
+
+    # Groups that describe the document rather than say anything.
+    SKIPPED = {
+        "fonttbl", "colortbl", "stylesheet", "info", "pict", "object",
+        "listtable", "listoverridetable", "rsidtbl", "generator", "themedata",
+        "datastore", "xmlnstbl",
+    }
+    BREAKS = {"par": "\n", "line": "\n", "sect": "\n\n", "tab": "\t", "cell": "\t"}
+
+    out: list[str] = []
+    depth = 0
+    skip_to_depth: int | None = None
+    i, n = 0, len(text)
+
+    while i < n:
+        char = text[i]
+
+        if char == "{":
+            depth += 1
+            i += 1
+            continue
+        if char == "}":
+            if skip_to_depth is not None and depth <= skip_to_depth:
+                skip_to_depth = None
+            depth -= 1
+            i += 1
+            continue
+
+        if char == "\\":
+            match = re.match(r"\\([a-zA-Z]+)(-?\d+)?[ ]?", text[i:])
+            if match:
+                word, param = match.group(1), match.group(2)
+                i += match.end()
+                if skip_to_depth is not None:
+                    continue
+                if word in SKIPPED:
+                    # Everything up to this group's closing brace is metadata.
+                    skip_to_depth = depth
+                elif word == "u" and param is not None:
+                    out.append(chr(int(param) % 0x10000))
+                    # The following character is the substitute for readers that
+                    # cannot do unicode; it would be a duplicate here.
+                    if i < n and text[i] not in "\\{}":
+                        i += 1
+                elif word in BREAKS:
+                    out.append(BREAKS[word])
+                continue
+
+            # An escape: \' hex, or a literal brace or backslash.
+            if text.startswith("\\'", i) and i + 3 < n:
+                try:
+                    byte = bytes([int(text[i + 2 : i + 4], 16)])
+                    if skip_to_depth is None:
+                        out.append(byte.decode("cp1252", "replace"))
+                except ValueError:
+                    pass
+                i += 4
+                continue
+            if i + 1 < n:
+                if skip_to_depth is None:
+                    out.append(text[i + 1])
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if skip_to_depth is None:
+            out.append(char)
+        i += 1
+
+    return _collapse_blank_lines("".join(out))
+
+
+def _collapse_blank_lines(text: str) -> str:
+    import re
+
+    return re.sub(r"\n{3,}", "\n\n", text).strip()

@@ -132,6 +132,7 @@ def schedule_run() -> None:
         return
 
     created = _run_incremental(quiet=False)
+    created += _run_file_pass()
 
     # Embedding is minutes of GPU for nothing when there is nothing new, so the
     # scheduled job only pays for it when the sync actually produced chunks.
@@ -148,6 +149,37 @@ def schedule_run() -> None:
             _embed_pending(cfg)
         else:
             typer.echo("no chunks awaiting vectors")
+
+
+def _run_file_pass() -> int:
+    """The incremental filesystem pass, for the scheduled job.
+
+    Unchanged files cost a stat each and nothing else, so walking Documents and
+    Downloads every fifteen minutes is cheap enough to be unremarkable.
+    """
+    from muster.connectors.files import FileConnector
+    from muster.fileingest import ingest_file
+
+    cfg = load_config()
+    if not cfg.files.roots:
+        return 0
+
+    connector = FileConnector(cfg.files.roots, max_bytes=cfg.files.max_bytes)
+    conn = db.connect(cfg.db_path)
+    created = 0
+    try:
+        for record in connector.walk():
+            try:
+                result = ingest_file(conn, record)
+            except Exception:  # noqa: BLE001 — one file must not end the pass
+                logging.getLogger("muster.sync").exception("failed to index %s", record.path)
+                continue
+            if result.created or result.updated:
+                created += 1
+    finally:
+        conn.close()
+    typer.echo(f"files: {created} new or changed of {connector.stats.seen} seen")
+    return created
 
 
 def _embed_pending(cfg) -> None:
@@ -497,6 +529,109 @@ def sync_gmail(
     except GmailAuthError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
+
+
+@sync_app.command("files")
+def sync_files(
+    roots: Annotated[
+        list[str] | None,
+        typer.Option("--root", help="Directory to walk. Repeatable; overrides config."),
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Re-read every file, ignoring size and mtime.")
+    ] = False,
+    quiet: Annotated[bool, typer.Option("--quiet", help="Summary only.")] = False,
+) -> None:
+    """Index local files. Documents and Downloads by default."""
+    from muster.connectors.files import FileConnector
+    from muster.fileingest import ingest_file
+    from muster.locking import LockHeld, sync_lock
+
+    cfg = load_config()
+    cfg.ensure_dirs()
+    _require_db(cfg)
+
+    connector = FileConnector(
+        tuple(roots) if roots else cfg.files.roots, max_bytes=cfg.files.max_bytes
+    )
+    typer.echo("walking " + ", ".join(connector.roots))
+
+    created = updated = moved = unchanged = empty = failed = 0
+    chunks = 0
+    by_date_source: dict[str, int] = {}
+
+    conn = db.connect(cfg.db_path)
+    try:
+        with sync_lock(cfg.lock_path):
+            for record in connector.walk():
+                try:
+                    result = ingest_file(conn, record, force=force)
+                except Exception as exc:  # noqa: BLE001 — one file, not the walk
+                    failed += 1
+                    logging.getLogger("muster.sync").exception(
+                        "failed to index %s: %s", record.path, exc
+                    )
+                    continue
+
+                chunks += result.chunks
+                if result.created:
+                    created += 1
+                    by_date_source[result.date_source] = (
+                        by_date_source.get(result.date_source, 0) + 1
+                    )
+                    if not quiet:
+                        typer.echo(f"  {record.path}  {result.chunks} chunks")
+                elif result.updated:
+                    updated += 1
+                elif result.moved:
+                    moved += 1
+                elif result.unchanged:
+                    unchanged += 1
+                if result.empty and (result.created or result.updated):
+                    empty += 1
+    except LockHeld:
+        typer.echo("another sync is already running; nothing to do", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        conn.close()
+
+    stats = connector.stats
+    typer.echo(
+        f"\n{stats.seen} files seen"
+        f"\n  {stats.excluded_type} skipped: not indexable"
+        f"\n  {stats.excluded_secret} skipped: looks like credentials"
+        f"\n  {stats.too_big} skipped: over {cfg.files.max_bytes // (1024 * 1024)}MB"
+        f"\n  {stats.excluded_dir} directories pruned"
+        f"\n  {stats.unreadable} unreadable"
+        f"\n  {created} newly indexed"
+        f"\n  {updated} changed and re-indexed"
+        f"\n  {moved} recognised as moved"
+        f"\n  {unchanged} unchanged"
+        f"\n  {failed} failed"
+        f"\n{chunks} chunks"
+    )
+    if empty:
+        typer.echo(f"  {empty} had no extractable text (indexed as metadata only)")
+    if by_date_source:
+        ordered = ", ".join(f"{k} {v}" for k, v in sorted(by_date_source.items()))
+        typer.echo(f"  dates from: {ordered}")
+    for root in stats.roots_missing:
+        typer.echo(f"  warning: no such directory: {root}", err=True)
+    if stats.walk_errors:
+        typer.echo(f"  {stats.walk_errors} directories could not be read", err=True)
+    if stats.roots_denied:
+        typer.echo(
+            typer.style(
+                "\nmacOS denied access to:\n  "
+                + "\n  ".join(stats.roots_denied)
+                + "\n\nThese folders are protected. Nothing was indexed from them —\n"
+                "this is a permissions prompt that never appeared, not an empty folder.\n"
+                "Grant access in System Settings > Privacy & Security > Full Disk Access\n"
+                "for the program running muster (your terminal, or muster itself).",
+                fg="yellow",
+            ),
+            err=True,
+        )
 
 
 @sync_app.command("mbox")
