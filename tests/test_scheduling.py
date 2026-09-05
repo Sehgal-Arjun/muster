@@ -142,3 +142,58 @@ def test_power_treats_unreadable_output_as_mains(monkeypatch) -> None:
 
     monkeypatch.setattr(subprocess, "run", boom)
     assert scheduling.power().on_battery is False
+
+
+def test_the_scheduled_pass_holds_the_lock_for_its_whole_duration(tmp_path, monkeypatch) -> None:
+    """Probing the lock and releasing it is the same as not locking at all.
+
+    The first walk of a large Documents folder runs far longer than the
+    fifteen-minute timer, so a released lock means the next run starts on top of
+    the last — both walking the same tree and writing the same rows.
+    """
+    from muster import cli
+    from muster.locking import LockHeld, sync_lock
+
+    cfg = cli.load_config()
+    held_during_work: list[bool] = []
+
+    def check_lock() -> bool:
+        """True if the lock is held by somebody — including us."""
+        try:
+            with sync_lock(cfg.lock_path):
+                return False
+        except LockHeld:
+            return True
+
+    monkeypatch.setattr(
+        cli, "_run_incremental",
+        lambda **kw: (held_during_work.append(check_lock()), 0)[1],
+    )
+    monkeypatch.setattr(
+        cli, "_run_file_pass",
+        lambda: (held_during_work.append(check_lock()), 0)[1],
+    )
+    import muster.scheduling as sched
+    monkeypatch.setattr(sched, "power", lambda: sched.Power(on_battery=False, percent=100))
+
+    cli.schedule_run()
+
+    assert held_during_work == [True, True], "the lock was not held across the pass"
+
+
+def test_the_scheduled_pass_stands_down_when_the_lock_is_held(monkeypatch, capsys) -> None:
+    from muster import cli
+    from muster.locking import sync_lock
+    import muster.scheduling as sched
+
+    cfg = cli.load_config()
+    monkeypatch.setattr(sched, "power", lambda: sched.Power(on_battery=False, percent=100))
+    ran = []
+    monkeypatch.setattr(cli, "_run_incremental", lambda **kw: ran.append("gmail") or 0)
+    monkeypatch.setattr(cli, "_run_file_pass", lambda: ran.append("files") or 0)
+
+    with sync_lock(cfg.lock_path):
+        cli.schedule_run()
+
+    assert ran == [], "it ran anyway while another sync held the lock"
+    assert "skipped" in capsys.readouterr().out

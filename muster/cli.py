@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import logging
 from pathlib import Path
@@ -51,9 +52,15 @@ def _sync_root(
     _run_incremental(quiet=False)
 
 
-def _run_incremental(*, quiet: bool) -> int:
-    """One incremental Gmail pass. Returns the number of new documents."""
-    from muster import incremental, syncstate
+def _run_incremental(*, quiet: bool, hold_lock: bool = True) -> int:
+    """One incremental Gmail pass. Returns the number of new documents.
+
+    ``hold_lock=False`` for callers that already hold it. flock is per
+    descriptor, so acquiring it twice in one process deadlocks against itself —
+    and with LOCK_NB that surfaces as "another sync is running", which would be
+    a confusing way to describe a process blocking on its own lock.
+    """
+    from muster import incremental
     from muster.connectors.gmail import GmailAuthError, GmailConnector
     from muster.locking import LockHeld, sync_lock
 
@@ -63,7 +70,7 @@ def _run_incremental(*, quiet: bool) -> int:
 
     conn = db.connect(cfg.db_path)
     try:
-        with sync_lock(cfg.lock_path):
+        with sync_lock(cfg.lock_path) if hold_lock else contextlib.nullcontext():
             connector = GmailConnector(cfg.gmail.credentials_path, cfg.gmail.token_path)
             outcome = incremental.sync(conn, cfg, connector)
     except LockHeld:
@@ -122,33 +129,35 @@ def schedule_run() -> None:
         typer.echo(f"skipped: on battery at {power.percent}%")
         return
 
+    # Held for the whole pass, not probed and released. A first walk of a large
+    # Documents folder runs far longer than the fifteen-minute timer, so without
+    # this the next run starts on top of the last one — both walking the same
+    # tree and writing the same rows.
     try:
         with sync_lock(cfg.lock_path):
-            pass
+            created = _run_incremental(quiet=False, hold_lock=False)
+            created += _run_file_pass()
+
+            # Embedding is minutes of GPU for nothing when there is nothing new,
+            # so this is only paid for when the pass actually produced chunks.
+            if created:
+                from muster.embed import count_pending
+
+                conn = db.connect(cfg.db_path)
+                try:
+                    pending = count_pending(conn, cfg.embed.model_id)
+                finally:
+                    conn.close()
+                if pending:
+                    typer.echo(f"embedding {pending} new chunks")
+                    _embed_pending(cfg)
+                else:
+                    typer.echo("no chunks awaiting vectors")
     except LockHeld:
         # Not a failure. A backfill that runs for hours would otherwise have a
         # new run stacked on it every fifteen minutes.
         typer.echo("skipped: another sync holds the lock")
         return
-
-    created = _run_incremental(quiet=False)
-    created += _run_file_pass()
-
-    # Embedding is minutes of GPU for nothing when there is nothing new, so the
-    # scheduled job only pays for it when the sync actually produced chunks.
-    if created:
-        from muster.embed import count_pending
-
-        conn = db.connect(cfg.db_path)
-        try:
-            pending = count_pending(conn, cfg.embed.model_id)
-        finally:
-            conn.close()
-        if pending:
-            typer.echo(f"embedding {pending} new chunks")
-            _embed_pending(cfg)
-        else:
-            typer.echo("no chunks awaiting vectors")
 
 
 def _run_file_pass() -> int:
