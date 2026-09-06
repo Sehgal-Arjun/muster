@@ -123,12 +123,13 @@ class FileConnector:
         *,
         max_bytes: int = DEFAULT_MAX_BYTES,
         excluded_dirs: tuple[str, ...] = DEFAULT_EXCLUDED_DIRS,
+        extra_excluded_dirs: tuple[str, ...] = (),
         excluded_extensions: tuple[str, ...] = DEFAULT_EXCLUDED_EXTENSIONS,
         excluded_suffixes: tuple[str, ...] = DEFAULT_EXCLUDED_SUFFIXES,
     ):
         self.roots = tuple(roots)
         self.max_bytes = max_bytes
-        self.excluded_dirs = {d.lower() for d in excluded_dirs}
+        self.excluded_dirs = {d.lower() for d in (*excluded_dirs, *extra_excluded_dirs)}
         self.excluded_extensions = {e.lower() for e in excluded_extensions}
         self.excluded_suffixes = tuple(s.lower() for s in excluded_suffixes)
         self.stats = WalkStats()
@@ -170,6 +171,28 @@ class FileConnector:
     # --- the walk ----------------------------------------------------------
 
     def walk(self) -> Iterator[FileRecord]:
+        """Every file worth indexing: documents first, images last.
+
+        Not the order the directories happen to be in. Extracting a PDF or a
+        docx takes milliseconds; OCR on an image takes seconds, so a single
+        folder of screenshots can outweigh every real document on the disk by
+        two orders of magnitude. Walked in directory order, one such folder
+        starves everything behind it — a CV nine files into another directory
+        stays unfindable for an hour because four thousand screenshots happened
+        to be listed first.
+
+        Ordering by cost instead makes the index useful within about a minute
+        and lets OCR fill in behind it. The listing itself is stat-only and
+        cheap, so collecting it before yielding costs a second and a few MB.
+        """
+        documents: list[FileRecord] = []
+        images: list[FileRecord] = []
+        for record in self._scan():
+            (images if (record.mime or "").startswith("image/") else documents).append(record)
+        yield from documents
+        yield from images
+
+    def _scan(self) -> Iterator[FileRecord]:
         from muster.extract import is_text_bearing
 
         self.stats = WalkStats()

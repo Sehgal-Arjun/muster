@@ -173,7 +173,11 @@ def _run_file_pass() -> int:
     if not cfg.files.roots:
         return 0
 
-    connector = FileConnector(cfg.files.roots, max_bytes=cfg.files.max_bytes)
+    connector = FileConnector(
+        cfg.files.roots,
+        max_bytes=cfg.files.max_bytes,
+        extra_excluded_dirs=cfg.files.excluded_dirs,
+    )
     conn = db.connect(cfg.db_path)
     created = 0
     try:
@@ -561,7 +565,9 @@ def sync_files(
     _require_db(cfg)
 
     connector = FileConnector(
-        tuple(roots) if roots else cfg.files.roots, max_bytes=cfg.files.max_bytes
+        tuple(roots) if roots else cfg.files.roots,
+        max_bytes=cfg.files.max_bytes,
+        extra_excluded_dirs=cfg.files.excluded_dirs,
     )
     typer.echo("walking " + ", ".join(connector.roots))
 

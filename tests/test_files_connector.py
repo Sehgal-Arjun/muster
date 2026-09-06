@@ -306,3 +306,62 @@ def test_provenance_reaches_the_document(conn, tmp_path: Path) -> None:
         conn.execute("SELECT meta_json FROM docs WHERE id = ?", (result.doc_id,)).fetchone()[0]
     )
     assert meta["where_from"] == ["https://example.com/lease.pdf"]
+
+
+def test_documents_are_yielded_before_images(tmp_path: Path) -> None:
+    """OCR costs seconds and extraction costs milliseconds.
+
+    In directory order one folder of screenshots starves every real document
+    behind it, which is how a CV stayed unfindable for an hour while four
+    thousand images were OCR'd first.
+    """
+    shots = tmp_path / "screenshots"
+    shots.mkdir()
+    for i in range(5):
+        (shots / f"shot{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    (papers / "cv.pdf").write_bytes(b"%PDF-1.4\n")
+    (papers / "notes.txt").write_text("text")
+
+    kinds = [
+        "image" if (r.mime or "").startswith("image/") else "doc"
+        for r in FileConnector((str(tmp_path),)).walk()
+    ]
+    assert kinds.count("doc") == 2 and kinds.count("image") == 5
+    assert kinds[:2] == ["doc", "doc"], f"images were not deferred: {kinds}"
+
+
+def test_the_walk_still_reports_everything_it_skipped(tmp_path: Path) -> None:
+    """Ordering must not lose the stats, which are gathered during the scan."""
+    (tmp_path / "keep.txt").write_text("x")
+    (tmp_path / "movie.mp4").write_bytes(b"\x00")
+    (tmp_path / "id_rsa").write_text("secret")
+
+    connector = FileConnector((str(tmp_path),))
+    assert [r.path.name for r in connector.walk()] == ["keep.txt"]
+    assert connector.stats.seen == 3
+    assert connector.stats.excluded_secret == 1
+
+
+def test_config_can_exclude_a_directory_the_defaults_do_not_know_about(
+    tmp_path: Path,
+) -> None:
+    """Machine-specific junk: added to the defaults, not replacing them."""
+    junk = tmp_path / "controlcenter"
+    junk.mkdir()
+    (junk / "IMG_0001.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (junk / "note.txt").write_text("still not wanted")
+    nested = tmp_path / "deep" / "controlcenter"
+    nested.mkdir(parents=True)
+    (nested / "IMG_0002.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "real.txt").write_text("wanted")
+
+    connector = FileConnector((str(tmp_path),), extra_excluded_dirs=("controlcenter",))
+    assert [r.path.name for r in connector.walk()] == ["real.txt"]
+
+    # The built-in exclusions must still apply alongside it.
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "x.txt").write_text("noise")
+    connector = FileConnector((str(tmp_path),), extra_excluded_dirs=("controlcenter",))
+    assert [r.path.name for r in connector.walk()] == ["real.txt"]
