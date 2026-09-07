@@ -175,6 +175,7 @@ def test_the_scheduled_pass_holds_the_lock_for_its_whole_duration(tmp_path, monk
     )
     import muster.scheduling as sched
     monkeypatch.setattr(sched, "power", lambda: sched.Power(on_battery=False, percent=100))
+    monkeypatch.setattr("muster.embed.count_pending", lambda *a, **k: 0)
 
     cli.schedule_run()
 
@@ -197,3 +198,59 @@ def test_the_scheduled_pass_stands_down_when_the_lock_is_held(monkeypatch, capsy
 
     assert ran == [], "it ran anyway while another sync held the lock"
     assert "skipped" in capsys.readouterr().out
+
+
+def test_the_scheduled_pass_embeds_a_backlog_it_did_not_create(monkeypatch) -> None:
+    """"Did this run create chunks" is not "is anything unembedded".
+
+    Syncing from the command line leaves chunks with no vectors; only the
+    scheduled job embeds. Gating on what this run created left that backlog
+    permanently unembedded.
+    """
+    from muster import cli
+    import muster.scheduling as sched
+
+    monkeypatch.setattr(sched, "power", lambda: sched.Power(on_battery=False, percent=100))
+    monkeypatch.setattr(cli, "_run_incremental", lambda **kw: 0)   # nothing new
+    monkeypatch.setattr(cli, "_run_file_pass", lambda: 0)          # nothing changed
+    monkeypatch.setattr("muster.embed.count_pending", lambda *a, **k: 5_000)
+
+    embedded: list[int | None] = []
+    monkeypatch.setattr(cli, "_embed_pending", lambda cfg, limit=None: embedded.append(limit))
+
+    cli.schedule_run()
+    assert embedded == [5_000], "a pre-existing backlog was skipped"
+
+
+def test_the_scheduled_pass_caps_how_much_it_embeds_at_once(monkeypatch) -> None:
+    """A first pass has hundreds of thousands waiting; the lock is held throughout."""
+    from muster import cli
+    import muster.scheduling as sched
+
+    monkeypatch.setattr(sched, "power", lambda: sched.Power(on_battery=False, percent=100))
+    monkeypatch.setattr(cli, "_run_incremental", lambda **kw: 0)
+    monkeypatch.setattr(cli, "_run_file_pass", lambda: 0)
+    monkeypatch.setattr("muster.embed.count_pending", lambda *a, **k: 500_000)
+
+    embedded: list[int | None] = []
+    monkeypatch.setattr(cli, "_embed_pending", lambda cfg, limit=None: embedded.append(limit))
+
+    cli.schedule_run()
+    assert embedded == [cli.EMBED_PER_RUN]
+
+
+def test_nothing_pending_means_the_model_is_never_loaded(monkeypatch, capsys) -> None:
+    from muster import cli
+    import muster.scheduling as sched
+
+    monkeypatch.setattr(sched, "power", lambda: sched.Power(on_battery=False, percent=100))
+    monkeypatch.setattr(cli, "_run_incremental", lambda **kw: 0)
+    monkeypatch.setattr(cli, "_run_file_pass", lambda: 0)
+    monkeypatch.setattr("muster.embed.count_pending", lambda *a, **k: 0)
+
+    called = []
+    monkeypatch.setattr(cli, "_embed_pending", lambda *a, **k: called.append(1))
+    cli.schedule_run()
+
+    assert called == []
+    assert "no chunks awaiting vectors" in capsys.readouterr().out

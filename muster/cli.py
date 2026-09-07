@@ -24,6 +24,11 @@ app = typer.Typer(
 # invoke_without_command so `muster sync --incremental` is a command in its own
 # right: the routine case deserves the short spelling, and naming a provider to
 # ask "anything new?" is ceremony.
+# How many chunks one scheduled pass will embed before handing the machine
+# back. Not tuned: large enough that a backlog drains in hours rather than
+# days, small enough that no single run holds the lock for long.
+EMBED_PER_RUN = 20_000
+
 sync_app = typer.Typer(name="sync", help="Pull messages from a source.", invoke_without_command=True)
 app.add_typer(sync_app)
 
@@ -138,21 +143,33 @@ def schedule_run() -> None:
             created = _run_incremental(quiet=False, hold_lock=False)
             created += _run_file_pass()
 
-            # Embedding is minutes of GPU for nothing when there is nothing new,
-            # so this is only paid for when the pass actually produced chunks.
-            if created:
-                from muster.embed import count_pending
+            # Asked of the index, not of this run. "Did this pass create
+            # anything" is a different question from "is anything unembedded",
+            # and using the first left a backlog of a hundred thousand chunks
+            # that no scheduled run would ever have picked up — every one of
+            # them created by a sync run from the command line, which does not
+            # embed at all.
+            #
+            # Still cheap when there is nothing to do: one COUNT, and the model
+            # is never loaded unless it returns something.
+            from muster.embed import count_pending
 
-                conn = db.connect(cfg.db_path)
-                try:
-                    pending = count_pending(conn, cfg.embed.model_id)
-                finally:
-                    conn.close()
-                if pending:
-                    typer.echo(f"embedding {pending} new chunks")
-                    _embed_pending(cfg)
-                else:
-                    typer.echo("no chunks awaiting vectors")
+            conn = db.connect(cfg.db_path)
+            try:
+                pending = count_pending(conn, cfg.embed.model_id)
+            finally:
+                conn.close()
+
+            if pending:
+                # Bounded per run. A first pass over a large index has hundreds
+                # of thousands of chunks waiting, and embedding all of them in
+                # one go would hold the sync lock for hours — every fifteen
+                # minutes, forever, is a better shape for the same work.
+                batch = min(pending, EMBED_PER_RUN)
+                typer.echo(f"embedding {batch} of {pending} chunks awaiting vectors")
+                _embed_pending(cfg, limit=batch)
+            else:
+                typer.echo("no chunks awaiting vectors")
     except LockHeld:
         # Not a failure. A backfill that runs for hours would otherwise have a
         # new run stacked on it every fifteen minutes.
@@ -195,7 +212,7 @@ def _run_file_pass() -> int:
     return created
 
 
-def _embed_pending(cfg) -> None:
+def _embed_pending(cfg, limit: int | None = None) -> None:
     """Embed whatever is waiting.
 
     Calls the library rather than the `embed` command: invoking a Typer command
@@ -207,9 +224,11 @@ def _embed_pending(cfg) -> None:
     try:
         report = embed_pending(
             conn,
-            cfg.embed.model_id,
+            model_id=cfg.embed.model_id,
             device=cfg.embed.device,
             batch_size=cfg.embed.batch_size,
+            prepend_title=cfg.embed.prepend_title,
+            limit=limit,
         )
         typer.echo(f"embedded {report.embedded} chunks")
     finally:
