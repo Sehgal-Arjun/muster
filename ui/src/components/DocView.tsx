@@ -45,6 +45,24 @@ function longDate(iso: string | null): string {
 /** The last path segment, which is the part a reader is actually looking for. */
 const basename = (path: string) => path.split("/").filter(Boolean).pop() ?? path;
 
+/**
+ * A download URL, shortened to the part that means something.
+ *
+ * Where-from URLs are frequently signed export links running to several hundred
+ * characters of token. Printed in full they push the document itself off the
+ * screen — the reader came to see a PDF, not a query string. The host is the
+ * part that answers "where did this come from"; the rest is on hover.
+ */
+function shortUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    const tail = url.pathname.length > 24 ? `${url.pathname.slice(0, 24)}…` : url.pathname;
+    return url.host + (tail === "/" ? "" : tail);
+  } catch {
+    return raw.length > 60 ? `${raw.slice(0, 60)}…` : raw;
+  }
+}
+
 export function DocView({
   view,
   query,
@@ -126,6 +144,21 @@ export function DocView({
     [blobDir],
   );
 
+  /** Hand it to whatever owns the type — Preview for a PDF, Photos for an image. */
+  const openExternally = useCallback(async () => {
+    try {
+      const opener = await import("@tauri-apps/plugin-opener");
+      // The real file where there is one: opening the path puts the reader in
+      // Preview with their own document, not with a copy out of a blob store.
+      if (doc?.provenance?.path) await opener.openPath(doc.provenance.path);
+      else if (doc?.blob) await opener.openUrl(api.bytesUrl(doc.blob.url));
+      else return;
+      setFlash("Opened");
+    } catch (cause) {
+      setFlash(`Could not open: ${cause}`);
+    }
+  }, [doc]);
+
   const preview = useCallback(
     (attachment: Attachment) => {
       // Its own document when it has one — that is the searchable version, with
@@ -146,6 +179,12 @@ export function DocView({
     const onKey = (event: KeyboardEvent) => {
       const meta = event.metaKey || event.ctrlKey;
       const scroller = scrollRef.current;
+
+      if (meta && event.key.toLowerCase() === "o") {
+        event.preventDefault();
+        void openExternally();
+        return;
+      }
 
       if (meta && event.key.toLowerCase() === "c") {
         // Never override a real selection: the user asked to copy that, not the
@@ -193,7 +232,7 @@ export function DocView({
 
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [doc, attachments, attachSel, preview, reveal]);
+  }, [doc, attachments, attachSel, preview, reveal, openExternally]);
 
   if (view.kind === "blob") {
     return (
@@ -258,7 +297,12 @@ export function DocView({
             <Field label="Size" value={bytes(provenance.size_bytes)} />
           )}
           {!!provenance?.where_from?.length && (
-            <Field label="Downloaded from" value={provenance!.where_from.join("\n")} mono />
+            <Field
+              label="Downloaded from"
+              value={provenance!.where_from.map(shortUrl).join("\n")}
+              title={provenance!.where_from.join("\n")}
+              mono
+            />
           )}
           {provenance?.downloaded_date && (
             <Field label="Downloaded" value={longDate(provenance.downloaded_date)} />
@@ -328,25 +372,27 @@ export function DocView({
           {showPdf && (
             <iframe
               className="doc-embed"
-              src={api.blobUrl(doc.blob!.hash)}
+              src={api.bytesUrl(doc.blob!.url)}
               title={doc.title ?? "PDF"}
             />
           )}
           {showImage && (
-            <img className="doc-embed" src={api.blobUrl(doc.blob!.hash)} alt={doc.title ?? ""} />
+            <img className="doc-embed" src={api.bytesUrl(doc.blob!.url)} alt={doc.title ?? ""} />
           )}
-          {doc.text.trim() ? (
-            <article className="doc-body">
-              {(showPdf || showImage) && <div className="doc-sub dim">Extracted text</div>}
-              <Highlight text={doc.text} terms={terms} />
-            </article>
-          ) : (
-            !showPdf && !showImage && (
+          {/* The extracted text is what the index searched, not what the
+              document is. Showing it in place of a PDF hands the reader a
+              stripped transcription of their own CV — layout gone, ordering
+              mangled — when the real thing renders perfectly well. */}
+          {!showPdf && !showImage &&
+            (doc.text.trim() ? (
+              <article className="doc-body">
+                <Highlight text={doc.text} terms={terms} />
+              </article>
+            ) : (
               <div className="empty-detail dim doc-note">
                 No text was extracted from this document.
               </div>
-            )
-          )}
+            ))}
         </>
       )}
 
@@ -360,17 +406,20 @@ function Field({
   value,
   hint,
   mono,
+  title,
 }: {
   label: string;
   value: string | null;
   hint?: string;
   mono?: boolean;
+  /** The untruncated value, for anyone who needs the whole thing. */
+  title?: string;
 }) {
   if (!value) return null;
   return (
     <div className="field">
       <span className="field-label dim">{label}</span>
-      <span className={`field-value${mono ? " mono" : ""}`}>
+      <span className={`field-value${mono ? " mono" : ""}`} title={title ?? undefined}>
         {value}
         {hint && <span className="chip field-hint">{hint}</span>}
       </span>

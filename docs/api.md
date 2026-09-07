@@ -90,6 +90,7 @@ user cannot tell why "september 2024" returned nothing from August.
   "category": null,
   "attachment_count": 0,
   "content_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "preview": true,
   "sources": [
     { "doc_id": 2391, "source": "gmail", "source_uid": "19aa00bb11cc22dd#att18",
       "title": "Offer Letter - Application.pdf", "date": "2026-02-28T19:34:00+00:00" },
@@ -122,6 +123,10 @@ message body containing `<script>` becomes one.
 
 `kind` is `message` | `attachment` | `other`, derived from mime and uid shape,
 so the UI can pick an icon without parsing either.
+
+`preview` is true when `GET /thumb/{doc_id}` will return an image — PDFs and
+images. Carried on the hit so a result list does not fire a request per row to
+discover that most documents have nothing to show.
 
 `score.scale` names what `value` means, because the three modes are not
 comparable and a bare number invites the user to compare them:
@@ -246,6 +251,37 @@ so rather than render an empty document.
 
 **404** if the id does not exist. Ids are not stable; a UI holding one across a
 re-sync should expect this and fall back to `source_uid`.
+
+---
+
+## `GET /file/{id}`
+
+The bytes of an indexed file, read from where it lives on disk. Documents from
+the filesystem connector keep no blob — the file *is* the original — so this is
+what `doc.blob.url` points at for them.
+
+Takes a document id, never a path: there is no string a caller can supply that
+makes this read something that was not indexed. Mail is refused even when stored
+under the same source, because a message that came out of an mbox is not a
+document on disk.
+
+**404** if the id is not a filesystem document. **410** if the file has been
+moved or deleted since the last walk — the index outlives the file, and that is
+the honest answer rather than a 500. Supports range requests, so a PDF streams.
+
+`Cache-Control: private, no-cache` — unlike a blob, a path is not a hash and the
+bytes behind it can change.
+
+---
+
+## `GET /thumb/{id}`
+
+A small PNG preview: the first page of a PDF, or a downscaled image. `size` is
+the long edge, 16–512, default 96.
+
+Rendered on demand and cached by content hash, so it is immutable once made.
+**404** when the document has nothing worth showing, which is what `preview` on
+a hit tells the UI in advance.
 
 ---
 

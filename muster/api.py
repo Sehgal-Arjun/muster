@@ -140,6 +140,9 @@ def _hit_json(hit: Hit, rank: int, mode: str, best: float, extra: sqlite3.Row | 
         "category": extra["category"] if extra else None,
         "attachment_count": extra["attachment_count"] if extra else 0,
         "content_hash": hit.content_hash,
+        # Whether /thumb will produce something. Computed here so the list does
+        # not fire a request per row to discover that most have no preview.
+        "preview": _has_preview(extra["mime"] if extra else None),
         # Copies present in this result list, not in the index: if the floor cut
         # two of four, two is what the list is entitled to claim.
         "sources": [
@@ -372,20 +375,84 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "chunk_count": chunk_count,
             "redacted_by": meta.get("redacted_by"),
             "excluded_sender": meta.get("excluded_sender"),
-            "blob": (
-                {
-                    "hash": row["content_hash"],
-                    "bytes": _blob_size(store, row["blob_path"]),
-                    "mime": row["mime"],
-                    "url": f"/blob/{row['content_hash']}",
-                    "filename": _download_name(row),
-                }
-                if row["blob_path"]
-                else None
-            ),
+            # A file document keeps no blob — the file on disk is the original —
+            # so its bytes are served from the recorded path instead. Same shape
+            # either way, so a reader does not have to care which it is.
+            "blob": _blob_ref(store, row, meta),
             "attachments": attachments,
             "copies": copies,
         }
+
+    @app.get("/file/{doc_id}")
+    def file_bytes(
+        doc_id: int,
+        download: bool = False,
+        request: Request = None,  # type: ignore[assignment]
+        conn: sqlite3.Connection = Depends(connection),
+    ) -> Response:
+        """The bytes of an indexed file, read from where it lives on disk.
+
+        The path comes from the database, never from the caller: this endpoint
+        takes a document id, so there is no string a client could supply that
+        would make it read something that was not indexed.
+        """
+        row = conn.execute("SELECT * FROM docs WHERE id = ?", (doc_id,)).fetchone()
+        if row is None or not _is_filesystem_doc(row, _meta(row)):
+            raise ApiError(404, "not_found", f"No file document {doc_id}.")
+
+        path = Path(_meta(row)["path"])
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            # The index outlives the file: this is the honest failure for a
+            # document whose original was moved or deleted since the last walk.
+            raise ApiError(
+                410, "gone", f"{path} is no longer readable ({exc.strerror})."
+            ) from exc
+
+        mime = row["mime"] or "application/octet-stream"
+        headers = {
+            "Content-Disposition": (
+                f'{"attachment" if download else "inline"}; filename="{path.name}"'
+            ),
+            # Unlike a blob, a path is not a hash — the bytes behind it can
+            # change, so this must be revalidated rather than cached forever.
+            "Cache-Control": "private, no-cache",
+            "Accept-Ranges": "bytes",
+        }
+        range_header = request.headers.get("range") if request is not None else None
+        if range_header:
+            return _partial(data, range_header, mime, headers)
+        return Response(content=data, media_type=mime, headers=headers)
+
+    @app.get("/thumb/{doc_id}")
+    def thumb(
+        doc_id: int,
+        size: int = Query(96, ge=16, le=512),
+        conn: sqlite3.Connection = Depends(connection),
+    ) -> Response:
+        """A small preview image for a document, or 404 when there is none.
+
+        Rendered on demand and cached by content hash. A search result showing a
+        page of the actual document is worth far more than a generic file icon,
+        and the whole cost is one PNG the size of a favicon.
+        """
+        row = conn.execute("SELECT * FROM docs WHERE id = ?", (doc_id,)).fetchone()
+        if row is None:
+            raise ApiError(404, "not_found", f"No document {doc_id}.")
+
+        png = _thumbnail(cfg, store, row, size)
+        if png is None:
+            raise ApiError(404, "not_found", "No preview for this document.")
+        return Response(
+            content=png,
+            media_type="image/png",
+            headers={
+                # Keyed by content hash, so it can never go stale.
+                "Cache-Control": "private, max-age=31536000, immutable",
+                "ETag": f'"{row["content_hash"]}-{size}"',
+            },
+        )
 
     @app.get("/blob/{content_hash}")
     def blob(
@@ -606,9 +673,9 @@ def _provenance(row: sqlite3.Row, meta: dict) -> dict | None:
     download, and they are the join back to the message that pointed at the
     file. Absent for mail, which has no path and no download.
     """
-    path = meta.get("path")
-    if not path:
+    if not _is_filesystem_doc(row, meta):
         return None
+    path = meta["path"]
 
     where_from = meta.get("where_from")
     if isinstance(where_from, str):
@@ -649,6 +716,132 @@ def _document_text(conn, store, row) -> tuple[str, int]:
         "SELECT text FROM chunks WHERE doc_id = ? ORDER BY ord", (row["id"],)
     ).fetchall()
     return "\n\n".join(r[0] for r in rows), chunk_count
+
+
+def _is_filesystem_doc(row: sqlite3.Row, meta: dict) -> bool:
+    """Whether this document's original is a file on disk we can still read.
+
+    Checked by shape rather than by the source string alone. Mail imported from
+    an mbox was historically stored under the same source and carries a path in
+    its metadata too, so the source is not on its own enough to tell a document
+    on disk from a message that came out of one.
+    """
+    if row["source"] != "file" or row["mime"] == "message/rfc822":
+        return False
+    path = meta.get("path")
+    return bool(path) and Path(path).is_absolute()
+
+
+def _has_preview(mime: str | None) -> bool:
+    mime = (mime or "").lower()
+    return mime.startswith("image/") or mime == "application/pdf"
+
+
+def _blob_ref(store: BlobStore, row: sqlite3.Row, meta: dict) -> dict | None:
+    """Where a document's bytes can be fetched from.
+
+    Two kinds of original, one shape. Mail and attachments live in the blob
+    store and are addressed by hash; a file lives on disk and is addressed by
+    document id, because a path is not content and cannot be cached forever.
+    """
+    if row["blob_path"]:
+        return {
+            "hash": row["content_hash"],
+            "bytes": _blob_size(store, row["blob_path"]),
+            "mime": row["mime"],
+            "url": f"/blob/{row['content_hash']}",
+            "filename": _download_name(row),
+        }
+
+    if _is_filesystem_doc(row, meta):
+        path = meta["path"]
+        return {
+            "hash": row["content_hash"],
+            "bytes": meta.get("size"),
+            "mime": row["mime"],
+            "url": f"/file/{row['id']}",
+            "filename": Path(path).name,
+        }
+    return None
+
+
+def _thumbnail(cfg: Config, store: BlobStore, row: sqlite3.Row, size: int) -> bytes | None:
+    """A small PNG preview, rendered once and cached by content hash.
+
+    The first page of a PDF or a downscaled image. Anything else has nothing
+    worth showing, and a generic glyph is what the icon is already for.
+    """
+    if not _has_preview(row["mime"]):
+        return None
+
+    cache = cfg.home / "thumbs" / f"{row['content_hash']}-{size}.png"
+    try:
+        if cache.exists():
+            return cache.read_bytes()
+    except OSError:
+        pass
+
+    data = _original_bytes(store, row)
+    if data is None:
+        return None
+
+    try:
+        png = _render_thumb(data, row["mime"], size)
+    except Exception as exc:  # noqa: BLE001 — an unreadable original is not an error
+        log.debug("no thumbnail for doc %s: %s", row["id"], exc)
+        return None
+
+    if png:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(png)
+        except OSError:
+            pass  # a cache that cannot be written is still a working thumbnail
+    return png
+
+
+def _original_bytes(store: BlobStore, row: sqlite3.Row) -> bytes | None:
+    if row["blob_path"]:
+        try:
+            return store.get_blob(row["blob_path"])
+        except (BlobNotFound, OSError):
+            return None
+    meta = _meta(row)
+    path = meta.get("path") or (row["source_uid"] if row["source"] == "file" else None)
+    if not path:
+        return None
+    try:
+        return Path(path).read_bytes()
+    except OSError:
+        return None
+
+
+def _render_thumb(data: bytes, mime: str | None, size: int) -> bytes | None:
+    import io
+
+    mime = (mime or "").lower()
+
+    if mime == "application/pdf":
+        import pymupdf
+
+        with pymupdf.open(stream=data, filetype="pdf") as doc:
+            if not doc.page_count:
+                return None
+            page = doc.load_page(0)
+            # Scale so the long edge lands on the requested size.
+            box = page.rect
+            zoom = size / max(box.width, box.height, 1)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+            return pix.tobytes("png")
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as image:
+        image = image.convert("RGB")
+        image.thumbnail((size, size))
+        out = io.BytesIO()
+        image.save(out, format="PNG", optimize=True)
+        return out.getvalue()
 
 
 def _blob_size(store: BlobStore, blob_path: str | None) -> int | None:

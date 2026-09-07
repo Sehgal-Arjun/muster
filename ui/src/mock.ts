@@ -24,6 +24,7 @@ const hit = (over: Partial<SearchResponse["results"][number]> = {}) => ({
   category: null,
   attachment_count: 0,
   content_hash: "1111111111111111111111111111111111111111111111111111111111111111",
+  preview: false,
   sources: [
     {
       doc_id: 101,

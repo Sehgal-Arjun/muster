@@ -42,7 +42,11 @@ class MboxConnector:
 
     source = "file"
 
-    def __init__(self, path: Path, *, source_name: str = "file"):
+    # 'mbox', not 'file': this yields mail that happens to be stored in a file,
+    # and the filesystem connector yields files. Sharing one source string made
+    # an imported message indistinguishable from a document on disk — /file
+    # would try to serve it, and /doc would give it a provenance block.
+    def __init__(self, path: Path, *, source_name: str = "mbox"):
         self.path = Path(path).expanduser().resolve()
         self.source = source_name
         self.skipped_known = 0

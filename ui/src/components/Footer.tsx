@@ -4,6 +4,7 @@ const SEARCH_HINTS: Array<[string, string]> = [
   ["↑↓", "navigate"],
   ["↵", "read"],
   ["⌘↵", "reveal in Finder"],
+  ["⌘O", "open"],
   ["⌘K", "actions"],
   ["⌘1/2/3", "mode"],
   ["esc", "close"],
@@ -14,6 +15,7 @@ const SEARCH_HINTS: Array<[string, string]> = [
 const READING_HINTS: Array<[string, string]> = [
   ["↑↓ jk", "scroll"],
   ["↵", "open attachment"],
+  ["⌘O", "open"],
   ["⌘↵", "reveal in Finder"],
   ["⌘C", "copy body"],
   ["esc", "back"],

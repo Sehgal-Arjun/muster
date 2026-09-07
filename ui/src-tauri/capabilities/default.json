@@ -1,14 +1,24 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the panel window is allowed to do. Deliberately small: it renders search results and opens files, and needs nothing else.",
-  "windows": ["spotlight"],
+  "description": "What the panel window is allowed to do. Deliberately small: it renders search results, opens files and reveals them, and needs nothing else.",
+  "windows": [
+    "spotlight"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:webview:allow-internal-toggle-devtools",
     "opener:allow-open-url",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        {
+          "path": "$HOME/**"
+        }
+      ]
+    },
     "opener:allow-reveal-item-in-dir",
     "global-shortcut:default"
   ]

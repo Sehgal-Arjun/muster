@@ -41,6 +41,8 @@ export interface Hit {
   category: string | null;
   attachment_count: number;
   content_hash: string | null;
+  /** True when /thumb will return an image. Saves a request per row. */
+  preview: boolean;
   /** Copies in *this result list*, best first. Renders as (xN). */
   sources: SourceRef[];
   score: Score;
@@ -240,4 +242,10 @@ export const api = {
   /** Where those bytes actually live, for Finder. */
   blobPath: (blobDir: string, hash: string) =>
     `${blobDir}/${hash.slice(0, 2)}/${hash}`,
+
+  /** A rendered preview: first page of a PDF, or a downscaled image. */
+  thumbUrl: (docId: number, size = 96) => `${BASE}/thumb/${docId}?size=${size}`,
+
+  /** Absolute URL for a doc's own bytes, blob-backed or on disk. */
+  bytesUrl: (path: string) => `${BASE}${path}`,
 };

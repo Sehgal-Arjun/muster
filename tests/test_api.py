@@ -53,7 +53,7 @@ def test_a_hit_has_every_documented_field(client) -> None:
     assert set(hit) == {
         "rank", "doc_id", "title", "snippet", "date", "source", "kind", "mime",
         "counterparty", "sender", "category", "attachment_count", "content_hash",
-        "sources", "score",
+        "preview", "sources", "score",
     }
     assert hit["rank"] == 1
     assert hit["kind"] in {"message", "attachment", "other"}
@@ -381,31 +381,44 @@ def test_doc_provenance_is_absent_for_mail(client, conn) -> None:
     assert client.get(f"/doc/{doc_id}").json()["provenance"] is None
 
 
-def test_doc_provenance_reports_a_files_path_and_where_it_came_from(client, conn) -> None:
+def test_doc_provenance_reports_a_files_path_and_where_it_came_from(
+    client, conn, tmp_path
+) -> None:
     """The Spotlight fields are the join from a download back to its message."""
-    import json
+    from muster.connectors.files import FileConnector
+    from muster.fileingest import ingest_file
 
-    doc_id = conn.execute("SELECT id FROM docs LIMIT 1").fetchone()[0]
+    target = tmp_path / "lease.pdf"
+    target.write_bytes(b"%PDF-1.4\n")
+    record = next(iter(FileConnector((str(tmp_path),)).walk()))
+    result = ingest_file(conn, record)
     conn.execute(
-        "UPDATE docs SET meta_json = ? WHERE id = ?",
-        (
-            json.dumps(
-                {
-                    "path": "/Users/x/Downloads/lease.pdf",
-                    "where_from": ["https://example.com/lease.pdf"],
-                    "downloaded_date": "2026-03-04T10:00:00Z",
-                    "size": 8192,
-                }
-            ),
-            doc_id,
-        ),
+        "UPDATE docs SET meta_json = json_set(meta_json, '$.where_from',"
+        " json_array('https://example.com/lease.pdf')) WHERE id = ?",
+        (result.doc_id,),
     )
     conn.commit()
 
-    provenance = client.get(f"/doc/{doc_id}").json()["provenance"]
-    assert provenance["path"] == "/Users/x/Downloads/lease.pdf"
+    provenance = client.get(f"/doc/{result.doc_id}").json()["provenance"]
+    assert provenance["path"] == str(target)
     assert provenance["where_from"] == ["https://example.com/lease.pdf"]
-    assert provenance["size_bytes"] == 8192
+    assert provenance["size_bytes"] == target.stat().st_size
+
+
+def test_mail_never_gets_provenance_even_carrying_a_path(client, conn) -> None:
+    """An mbox import has a path in its metadata but is not a file on disk."""
+    import json
+
+    doc_id = conn.execute(
+        "SELECT id FROM docs WHERE mime = 'message/rfc822' LIMIT 1"
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE docs SET meta_json = ? WHERE id = ?",
+        (json.dumps({"path": "/var/mail/archive.mbox"}), doc_id),
+    )
+    conn.commit()
+
+    assert client.get(f"/doc/{doc_id}").json()["provenance"] is None
 
 
 # --- POST /sync/refresh ---------------------------------------------------
@@ -467,3 +480,97 @@ def test_a_held_lock_is_reported_as_skipped_not_failed(client, cfg, monkeypatch)
 
     assert api_module._jobs["j1"]["state"] == "skipped"
     assert api_module._jobs["j1"]["error"] is None
+
+
+# --- previews and file bytes ----------------------------------------------
+
+
+def test_a_file_document_gets_a_blob_that_resolves(client, conn, cfg, tmp_path) -> None:
+    """File docs keep no blob, so /doc must point at the path instead.
+
+    Without this a PDF on disk renders as stripped text, because the viewer has
+    no bytes to show — which is not what anyone means by "open my CV".
+    """
+    from muster.connectors.files import FileConnector
+    from muster.fileingest import ingest_file
+
+    pdf = tmp_path / "cv.pdf"
+    pymupdf = pytest.importorskip("pymupdf")
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "Sam Reyes curriculum vitae")
+    doc.save(pdf)
+    doc.close()
+
+    record = next(iter(FileConnector((str(tmp_path),)).walk()))
+    result = ingest_file(conn, record)
+    conn.commit()
+
+    body = client.get(f"/doc/{result.doc_id}").json()
+    assert body["blob"] is not None, "a file document must still offer its bytes"
+    assert body["blob"]["url"] == f"/file/{result.doc_id}"
+
+    served = client.get(body["blob"]["url"])
+    assert served.status_code == 200
+    assert served.content[:5] == b"%PDF-"
+    assert served.headers["content-type"].startswith("application/pdf")
+
+
+def test_file_bytes_cannot_be_asked_for_by_path(client) -> None:
+    """The endpoint takes an id; there is no string that reaches the filesystem."""
+    assert client.get("/file/999999").status_code == 404
+    # Mail is not a filesystem document, whatever source string it was stored
+    # under, and must never be served as one.
+    mail_id = 1
+    assert client.get(f"/file/{mail_id}").status_code == 404
+
+
+def test_a_file_that_has_gone_is_reported_as_gone(client, conn, cfg, tmp_path) -> None:
+    """The index outlives the file. 410 is the honest answer, not 500."""
+    from muster.connectors.files import FileConnector
+    from muster.fileingest import ingest_file
+
+    doomed = tmp_path / "temp.txt"
+    doomed.write_text("indexed, then deleted")
+    record = next(iter(FileConnector((str(tmp_path),)).walk()))
+    result = ingest_file(conn, record)
+    conn.commit()
+    doomed.unlink()
+
+    assert client.get(f"/file/{result.doc_id}").status_code == 410
+
+
+def test_thumbnail_renders_the_first_page_of_a_pdf(client, conn, tmp_path) -> None:
+    from muster.connectors.files import FileConnector
+    from muster.fileingest import ingest_file
+
+    pymupdf = pytest.importorskip("pymupdf")
+    pdf = tmp_path / "doc.pdf"
+    d = pymupdf.open()
+    d.new_page().insert_text((72, 72), "page one")
+    d.save(pdf)
+    d.close()
+
+    record = next(iter(FileConnector((str(tmp_path),)).walk()))
+    result = ingest_file(conn, record)
+    conn.commit()
+
+    response = client.get(f"/thumb/{result.doc_id}?size=64")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_no_thumbnail_for_something_with_nothing_to_show(client, conn) -> None:
+    doc_id = conn.execute(
+        "SELECT id FROM docs WHERE mime = 'message/rfc822' LIMIT 1"
+    ).fetchone()[0]
+    assert client.get(f"/thumb/{doc_id}").status_code == 404
+
+
+def test_hits_declare_whether_a_preview_exists(client) -> None:
+    """So the list does not fire a thumbnail request per row to find out."""
+    body = client.get("/search", params={"q": "lease", "limit": 10}).json()
+    for hit in body["results"]:
+        assert isinstance(hit["preview"], bool)
+        if hit["preview"]:
+            assert (hit["mime"] or "").startswith("image/") or hit["mime"] == "application/pdf"

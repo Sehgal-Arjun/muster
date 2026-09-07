@@ -233,20 +233,39 @@ export default function App() {
     }
   }, [stack.length]);
 
+  /**
+   * Where a hit's bytes actually are.
+   *
+   * A result carries a content hash, which is enough for mail — but a document
+   * from the filesystem keeps no blob, so the hash addresses nothing. One
+   * request to /doc answers it for either kind rather than guessing from the
+   * hash and 404ing on half the index.
+   */
+  const locate = useCallback(async (hit: Hit) => {
+    const doc = await api.doc(hit.doc_id);
+    return { path: doc.provenance?.path ?? null, url: doc.blob?.url ?? null };
+  }, []);
+
   /** Open the original in whatever handles its type. */
   const open = useCallback(
     async (hit: Hit | null) => {
-      if (!hit?.content_hash) return;
-      const url = api.blobUrl(hit.content_hash);
+      if (!hit) return;
       if (USE_MOCK) {
-        console.info("open", url);
+        console.info("open", hit.doc_id);
         return;
       }
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      await openUrl(url);
-      await hide();
+      try {
+        const { path, url } = await locate(hit);
+        const opener = await import("@tauri-apps/plugin-opener");
+        if (path) await opener.openPath(path);
+        else if (url) await opener.openUrl(api.bytesUrl(url));
+        else return;
+        await hide();
+      } catch (cause) {
+        setError(`Could not open: ${cause}`);
+      }
     },
-    [hide],
+    [hide, locate],
   );
 
   /**
@@ -257,17 +276,26 @@ export default function App() {
    */
   const reveal = useCallback(
     async (hit: Hit | null) => {
-      if (!hit?.content_hash || !blobDir) return;
-      const path = api.blobPath(blobDir, hit.content_hash);
+      if (!hit) return;
       if (USE_MOCK) {
-        console.info("reveal", path);
+        console.info("reveal", hit.doc_id);
         return;
       }
-      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-      await revealItemInDir(path);
-      await hide();
+      try {
+        // The real file if there is one; the stored blob otherwise. Revealing a
+        // blob path for a document that never had one lands Finder nowhere.
+        const { path } = await locate(hit);
+        const target =
+          path ?? (hit.content_hash && blobDir ? api.blobPath(blobDir, hit.content_hash) : null);
+        if (!target) return;
+        const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+        await revealItemInDir(target);
+        await hide();
+      } catch (cause) {
+        setError(`Could not reveal: ${cause}`);
+      }
     },
-    [blobDir, hide],
+    [blobDir, hide, locate],
   );
 
   const actions: Action[] = useMemo(() => {
@@ -277,7 +305,7 @@ export default function App() {
       { id: "reveal", label: "Reveal in Finder", hint: "⌘↵", run: () => reveal(current) },
       // Still offered: reading it here is the default, not a replacement for
       // whatever the reader actually wants to do with the file.
-      { id: "open", label: "Open in default app", run: () => open(current) },
+      { id: "open", label: "Open in default app", hint: "⌘O", run: () => open(current) },
       {
         id: "copy-title",
         label: "Copy subject",
@@ -352,6 +380,9 @@ export default function App() {
       // Enter reads it here. Leaving the panel to open Gmail or Preview is the
       // failure this view exists to remove; ⌘↵ still reveals the original.
       void (meta ? reveal(current) : read(current));
+    } else if (meta && event.key.toLowerCase() === "o") {
+      event.preventDefault();
+      void open(current);
     } else if (meta && event.key.toLowerCase() === "k") {
       event.preventDefault();
       if (current) setShowActions(true);
