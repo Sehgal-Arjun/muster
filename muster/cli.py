@@ -128,7 +128,13 @@ def schedule_run() -> None:
     from muster import scheduling
     from muster.locking import LockHeld, sync_lock
 
+    from muster import pausing
+
     cfg = load_config()
+    if pausing.is_paused(cfg.home):
+        typer.echo(f"skipped: paused since {pausing.paused_since(cfg.home)}")
+        return
+
     power = scheduling.power()
     if power.too_low:
         typer.echo(f"skipped: on battery at {power.percent}%")
@@ -218,19 +224,24 @@ def _embed_pending(cfg, limit: int | None = None) -> None:
     Calls the library rather than the `embed` command: invoking a Typer command
     as a function hands it the OptionInfo defaults instead of their values.
     """
+    from muster import pausing
     from muster.embed import embed_pending
 
     conn = db.connect(cfg.db_path)
     try:
         report = embed_pending(
             conn,
+            should_stop=lambda: pausing.is_paused(cfg.home),
             model_id=cfg.embed.model_id,
             device=cfg.embed.device,
             batch_size=cfg.embed.batch_size,
             prepend_title=cfg.embed.prepend_title,
             limit=limit,
         )
-        typer.echo(f"embedded {report.embedded} chunks")
+        if report.stopped:
+            typer.echo(f"paused after {report.chunks} chunks; the rest is still waiting")
+        else:
+            typer.echo(f"embedded {report.chunks} chunks")
     finally:
         conn.close()
 
@@ -743,6 +754,32 @@ def embed(
         f" in {report.batches} batches"
         f"\nmodel {report.model_id}  device {report.device}  dim {report.dimensions}"
     )
+
+
+@app.command()
+def pause() -> None:
+    """Stop background work: scheduled syncs, and any embedding in flight."""
+    from muster import pausing
+
+    cfg = load_config()
+    pausing.pause(cfg.home)
+    typer.echo(
+        "paused.\n"
+        "  a running embed stops after its current batch; nothing is lost\n"
+        "  scheduled syncs will skip until you run `muster resume`"
+    )
+
+
+@app.command()
+def resume() -> None:
+    """Allow background work again. Embedding continues where it stopped."""
+    from muster import pausing
+
+    cfg = load_config()
+    if pausing.resume(cfg.home):
+        typer.echo("resumed. the next scheduled run picks up where it left off")
+    else:
+        typer.echo("not paused; nothing to do")
 
 
 @app.command()

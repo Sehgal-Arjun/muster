@@ -200,6 +200,10 @@ class EmbedReport:
     chunks: int = 0
     batches: int = 0
     dimensions: int | None = None
+    # True when a caller asked it to stop early. The remainder is still
+    # pending, so the next run continues from here.
+    stopped: bool = False
+
 
 
 def embed_pending(
@@ -210,6 +214,7 @@ def embed_pending(
     batch_size: int = DEFAULT_BATCH,
     limit: int | None = None,
     progress=None,
+    should_stop=None,
     model=None,
     prepend_title: bool = False,
 ) -> EmbedReport:
@@ -224,6 +229,12 @@ def embed_pending(
     model = model or load_model(model_id, device)
 
     for start in range(0, len(groups), batch_size):
+        # Checked between batches, never inside one: a batch is the unit of work
+        # we are willing to lose, and stopping mid-batch would throw away GPU
+        # time already spent for nothing.
+        if should_stop is not None and should_stop():
+            report.stopped = True
+            break
         batch = groups[start : start + batch_size]
         vectors = encode_documents(
             model,

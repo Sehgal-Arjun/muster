@@ -278,3 +278,49 @@ def test_weighting_does_not_override_genuine_agreement() -> None:
 
     fused = reciprocal_rank_fusion([keyword, vector], limit=3, weights=[1.0, 0.9])
     assert fused[0].doc_id == 2
+
+
+# --- pausing --------------------------------------------------------------
+
+
+def test_embedding_stops_between_batches_when_asked(chunked) -> None:
+    """Checked between batches, never inside one.
+
+    A batch is the unit of work we are willing to lose; stopping mid-batch
+    would throw away GPU time already spent for nothing.
+    """
+    seen = {"batches": 0}
+
+    def stop_after_first() -> bool:
+        seen["batches"] += 1
+        return seen["batches"] > 1
+
+    report = embed_pending(
+        chunked, model_id=MODEL, model=FakeModel(), batch_size=1,
+        should_stop=stop_after_first,
+    )
+    assert report.stopped is True
+    assert report.batches == 1, "it kept going after being asked to stop"
+
+
+def test_what_was_not_embedded_is_still_pending(chunked) -> None:
+    """Stopping must leave work to resume, not silently mark it done."""
+    before = count_pending(chunked, MODEL)
+
+    embed_pending(
+        chunked, model_id=MODEL, model=FakeModel(), batch_size=1,
+        should_stop=lambda: True,
+    )
+    assert count_pending(chunked, MODEL) == before, "work vanished on pause"
+
+
+def test_pause_and_resume_round_trip(tmp_path) -> None:
+    from muster import pausing
+
+    assert pausing.is_paused(tmp_path) is False
+    pausing.pause(tmp_path)
+    assert pausing.is_paused(tmp_path) is True
+    assert pausing.paused_since(tmp_path)
+    assert pausing.resume(tmp_path) is True
+    assert pausing.is_paused(tmp_path) is False
+    assert pausing.resume(tmp_path) is False, "resuming twice is not an error"
