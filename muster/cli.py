@@ -717,6 +717,7 @@ def embed(
     ] = None,
 ) -> None:
     """Embed chunks that have no vector for the current model. Resumable."""
+    from muster import pausing
     from muster.embed import count_pending, embed_pending
 
     cfg = load_config()
@@ -745,6 +746,9 @@ def embed(
             batch_size=batch_size or cfg.embed.batch_size,
             limit=limit,
             progress=report_progress,
+            # A run started by hand is the one most likely to be in the way, so
+            # it honours the switch too — not only the scheduled one.
+            should_stop=lambda: pausing.is_paused(cfg.home),
         )
     finally:
         conn.close()
@@ -754,6 +758,11 @@ def embed(
         f" in {report.batches} batches"
         f"\nmodel {report.model_id}  device {report.device}  dim {report.dimensions}"
     )
+    if report.stopped:
+        typer.echo(
+            "\npaused before finishing. nothing was lost — `muster resume` then"
+            " re-run, or let the scheduled job carry on."
+        )
 
 
 @app.command()

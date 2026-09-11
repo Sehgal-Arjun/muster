@@ -324,3 +324,30 @@ def test_pause_and_resume_round_trip(tmp_path) -> None:
     assert pausing.resume(tmp_path) is True
     assert pausing.is_paused(tmp_path) is False
     assert pausing.resume(tmp_path) is False, "resuming twice is not an error"
+
+
+def test_the_hand_started_embed_command_honours_the_pause_switch(
+    chunked, cfg, monkeypatch, capsys
+) -> None:
+    """The run most likely to be in the way is the one started by hand.
+
+    Wiring the switch into only the scheduled path left `muster embed` — the
+    one actually hogging the GPU — unstoppable.
+    """
+    from muster import pausing
+    from muster.cli import embed as embed_command
+
+    monkeypatch.setattr("muster.cli.load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr("muster.db.connect", lambda *a, **k: chunked)
+    monkeypatch.setattr("muster.embed.load_model", lambda *a, **k: FakeModel())
+    pending_before = count_pending(chunked, MODEL)
+    assert pending_before > 0, "fixture has nothing to embed"
+
+    pausing.pause(cfg.home)
+    try:
+        embed_command(model=None, batch_size=1, device=None, limit=None)
+    finally:
+        pausing.resume(cfg.home)
+
+    # The command closes its own connection, so the evidence is what it said.
+    assert "paused before finishing" in capsys.readouterr().out
