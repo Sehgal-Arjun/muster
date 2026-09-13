@@ -719,10 +719,21 @@ def embed(
     """Embed chunks that have no vector for the current model. Resumable."""
     from muster import pausing
     from muster.embed import count_pending, embed_pending
+    from muster.locking import LockHeld, sync_lock
 
     cfg = load_config()
     _require_db(cfg)
     model_id = model or cfg.embed.model_id
+
+    # The same lock the scheduled pass holds. Embedding is not a sync, but it
+    # competes for the one GPU and writes the same table, and two runs loading
+    # bge-m3 at once is slower than either alone.
+    try:
+        lock = sync_lock(cfg.lock_path)
+        lock.__enter__()
+    except LockHeld:
+        typer.echo("another sync or embed is already running; nothing to do")
+        raise typer.Exit(0) from None
 
     conn = db.connect(cfg.db_path)
     try:
@@ -752,6 +763,7 @@ def embed(
         )
     finally:
         conn.close()
+        lock.__exit__(None, None, None)
 
     typer.echo(
         f"\n{report.chunks} vectors written from {report.groups} distinct texts"
