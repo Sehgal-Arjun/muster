@@ -113,6 +113,16 @@ def resolve_date(record: FileRecord) -> tuple[str, str]:
     return record.mtime, "mtime"
 
 
+def name_text(path: Path) -> str:
+    """A filename, rendered so it can be searched.
+
+    Separators become spaces because a tokeniser treats "Sam_Reyes_CV.pdf" as
+    one word, and nobody types it that way.
+    """
+    stem = re.sub(r"[_\-]+", " ", path.stem).strip()
+    return f"{stem}{path.suffix}" if stem else path.name
+
+
 def ingest_file(conn, record: FileRecord, *, force: bool = False) -> FileResult:
     """Index one file, or decline to because nothing about it changed."""
     from muster.extract import extract_text
@@ -122,7 +132,14 @@ def ingest_file(conn, record: FileRecord, *, force: bool = False) -> FileResult:
         (SOURCE, record.source_uid),
     ).fetchone()
 
-    if existing and not force:
+    # Indexed, but nothing of it reached the search index. Every "nothing has
+    # changed" shortcut below has to be skipped for these, or the document stays
+    # broken precisely because it is unchanged.
+    needs_repair = bool(existing) and not conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM chunks WHERE doc_id = ?)", (existing["id"],)
+    ).fetchone()[0]
+
+    if existing and not force and not needs_repair:
         meta = _meta(existing["meta_json"])
         # The cheap check, and the reason a re-walk of Downloads costs seconds:
         # size and mtime together are enough to say nothing happened, without
@@ -147,7 +164,7 @@ def ingest_file(conn, record: FileRecord, *, force: bool = False) -> FileResult:
             conn.commit()
             return FileResult(doc_id=moved["id"], moved=True)
 
-    if existing and existing["content_hash"] == digest:
+    if existing and existing["content_hash"] == digest and not needs_repair:
         # Touched but not changed. Record the new mtime so the cheap check above
         # succeeds next time instead of hashing it again on every walk.
         conn.execute(
@@ -165,6 +182,13 @@ def ingest_file(conn, record: FileRecord, *, force: bool = False) -> FileResult:
 
     text = extract_text(data, record.mime, record.path.name)
     chunks = chunk_text(text)
+    if not chunks:
+        # A photograph has no text in it, and that is not a reason to make the
+        # file unfindable. Chunks are the only thing that reaches the search
+        # index — a document with none has no row in it at all — so the name
+        # goes in instead. It is what someone searching for a passport photo
+        # actually types.
+        chunks = [name_text(record.path)]
     doc_date, date_source = resolve_date(record)
     meta = _metadata(record, digest)
 
@@ -201,7 +225,7 @@ def ingest_file(conn, record: FileRecord, *, force: bool = False) -> FileResult:
         result = FileResult(doc_id=doc_id, created=True, date_source=date_source)
 
     result.chunks = _insert_chunks(conn, doc_id, chunks, title=record.path.name)
-    result.empty = not chunks
+    result.empty = not text.strip()
     conn.commit()
     return result
 

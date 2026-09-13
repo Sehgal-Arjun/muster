@@ -365,3 +365,58 @@ def test_config_can_exclude_a_directory_the_defaults_do_not_know_about(
     (tmp_path / "node_modules" / "x.txt").write_text("noise")
     connector = FileConnector((str(tmp_path),), extra_excluded_dirs=("controlcenter",))
     assert [r.path.name for r in connector.walk()] == ["real.txt"]
+
+
+def test_a_file_with_no_extractable_text_is_still_findable_by_name(
+    conn, tmp_path: Path
+) -> None:
+    """Chunks are the only thing that reaches the index.
+
+    A photograph OCRs to nothing, and a document with no chunks has no row in
+    the search index at all — so "passport photo" could not find
+    passport_photo.png even though the name says exactly what it is.
+    """
+    from muster.fileingest import name_text
+
+    image = tmp_path / "passport_photo.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+    record = _record(tmp_path, "passport_photo.png")
+    result = ingest_file(conn, record)
+
+    assert result.chunks == 1
+    assert result.empty is True, "it still reports that no text was extracted"
+    text = conn.execute(
+        "SELECT text FROM chunks WHERE doc_id = ?", (result.doc_id,)
+    ).fetchone()[0]
+    assert text == "passport photo.png"
+    assert name_text(Path("Sam_Reyes-CV.pdf")) == "Sam Reyes CV.pdf"
+
+
+def test_the_name_chunk_is_reachable_through_search(conn, tmp_path: Path) -> None:
+    from muster.search import keyword_search
+
+    (tmp_path / "passport_photo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    ingest_file(conn, _record(tmp_path, "passport_photo.png"))
+    conn.commit()
+
+    hits = keyword_search(conn, "passport photo", min_score=0.0)
+    assert any("passport" in (h.title or "").lower() for h in hits)
+
+
+def test_a_document_left_with_no_chunks_is_retried_once(conn, tmp_path: Path) -> None:
+    """Unchanged means "nothing to do", not "leave it broken"."""
+    (tmp_path / "note.txt").write_text("some text")
+    record = _record(tmp_path, "note.txt")
+    first = ingest_file(conn, record)
+
+    # Simulate the broken state: indexed, but nothing reached the index.
+    conn.execute("DELETE FROM chunks WHERE doc_id = ?", (first.doc_id,))
+    conn.commit()
+
+    again = ingest_file(conn, record)
+    assert not again.unchanged, "size and mtime matched, so it skipped a broken doc"
+    assert again.chunks >= 1
+
+    # And having healed it, the next pass is a plain skip again.
+    assert ingest_file(conn, record).unchanged is True

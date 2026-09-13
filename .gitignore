@@ -1,42 +1,38 @@
-# Data — never committed. Blobs are content-addressed originals; the DB is derived.
-blobs/
-*.db
-*.db-wal
-*.db-shm
 
-# Secrets
+__pycache__/
+.claude/
+.DS_Store
 .env
-credentials.json
-client_secret*.json
-token.json
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.db
+*.db-shm
+*.db-wal
+*.egg-info/
+*.py[cod]
 *token*.json
-
-# Eval — the real query set names real senders, subjects and message ids from
 # a personal mailbox. Only queries.example.jsonl is ever committed. Results
+# Claude Code
+# Data — never committed. Blobs are content-addressed originals; the DB is derived.
+# Eval — the real query set names real senders, subjects and message ids from
 # files are redacted by default, and gitignored regardless.
+# macOS
+# Python
+# Secrets
+# Tauri / node
+blobs/
+build/
+client_secret*.json
+credentials.json
+dist/
 eval/queries.jsonl
 eval/queries.local.jsonl
 eval/results/
-
-# Python
-.venv/
-venv/
-__pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
-.pytest_cache/
-.ruff_cache/
-
-# macOS
-.DS_Store
-
-# Claude Code
-.claude/
-
-# Tauri / node
-ui/node_modules/
+token.json
 ui/dist/
-ui/src-tauri/target/
+ui/node_modules/
 ui/src-tauri/gen/
+ui/src-tauri/target/
+venv/
+worklog.md
