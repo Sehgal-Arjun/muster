@@ -27,6 +27,7 @@ TEXT_MIMES = {
 }
 PDF_MIMES = {"application/pdf", "application/x-pdf"}
 IMAGE_MIMES = {"image/png", "image/jpeg", "image/jpg", "image/tiff", "image/heic", "image/webp"}
+HTML_MIMES = {"text/html", "application/xhtml+xml"}
 DOCX_MIMES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
@@ -62,6 +63,8 @@ def extract_text(data: bytes, mime: str | None, filename: str | None) -> str:
             return extract_rtf(data)
         if mime in IMAGE_MIMES or name.endswith((".png", ".jpg", ".jpeg", ".tiff", ".heic")):
             return ocr_image_bytes(data)
+        if mime in HTML_MIMES or name.endswith((".html", ".htm", ".xhtml")):
+            return extract_html(data)
         if mime in TEXT_MIMES or mime.startswith("text/") or name.endswith((".txt", ".md", ".csv", ".json", ".log")):
             return decode_text(data)
     except Exception as exc:
@@ -306,3 +309,23 @@ def _collapse_blank_lines(text: str) -> str:
     import re
 
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def extract_html(data: bytes) -> str:
+    """Readable text from an HTML file.
+
+    Without this an exported notebook or slide deck is indexed as its own source
+    — doctype, inline scripts, base64 images and all. One such file produced
+    1,375 chunks of markup, and 540 of them accounted for two thirds of
+    everything waiting to be embedded, none of it text anybody would search for.
+
+    The same extractor the mail parser uses on HTML bodies, so a page and an
+    email body are read the same way.
+    """
+    from muster.htmltext import html_to_text
+
+    try:
+        return html_to_text(decode_text(data))
+    except Exception as exc:  # noqa: BLE001 — fall back rather than index nothing
+        log.warning("html extraction failed (%s); using the raw text", exc)
+        return decode_text(data)
