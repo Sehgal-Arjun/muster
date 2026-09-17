@@ -420,3 +420,52 @@ def test_a_document_left_with_no_chunks_is_retried_once(conn, tmp_path: Path) ->
 
     # And having healed it, the next pass is a plain skip again.
     assert ingest_file(conn, record).unchanged is True
+
+
+# --- what counts as a document -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["report.pdf", "notes.md", "letter.docx", "memo.rtf", "essay.txt",
+     "deck.pages", "scan.jpg", "shot.png", "slides.html"],
+)
+def test_documents_are_indexed(tmp_path: Path, name: str) -> None:
+    (tmp_path / name).write_bytes(b"content")
+    assert [r.path.name for r in FileConnector((str(tmp_path),)).walk()] == [name]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["all.min.js", "fontawesome.js", "style.css", "spec.c", "main.py",
+     "data.json", "tsconfig.ts", "Makefile", "schema.sql"],
+)
+def test_code_is_not_a_document(tmp_path: Path, name: str) -> None:
+    """The brief asked for pdf, docx, txt, md, rtf, pages and images.
+
+    Treating "is it text" as the test swept in build output: one bundled
+    fontawesome.js alone produced 718 chunks, and minified libraries came to a
+    quarter of everything waiting to be embedded.
+    """
+    (tmp_path / name).write_text("x = 1")
+    assert list(FileConnector((str(tmp_path),)).walk()) == []
+
+
+@pytest.mark.parametrize("directory", [".next", "dist", "build", "out", "target", "coverage"])
+def test_build_output_directories_are_pruned(tmp_path: Path, directory: str) -> None:
+    """Bundled files are named after the packages they inline, not placed under
+    node_modules, so excluding that name alone does not reach them."""
+    nested = tmp_path / directory / "static"
+    nested.mkdir(parents=True)
+    (nested / "bundle.pdf").write_bytes(b"%PDF-")
+    (tmp_path / "real.pdf").write_bytes(b"%PDF-")
+
+    assert [r.path.name for r in FileConnector((str(tmp_path),)).walk()] == ["real.pdf"]
+
+
+def test_the_allowlist_runs_after_the_secret_check(tmp_path: Path) -> None:
+    """A .pdf named like a credential is still refused."""
+    (tmp_path / "id_rsa.pdf").write_bytes(b"%PDF-")
+    connector = FileConnector((str(tmp_path),))
+    assert list(connector.walk()) == []
+    assert connector.stats.excluded_secret == 1

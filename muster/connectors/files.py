@@ -35,12 +35,20 @@ DEFAULT_MAX_BYTES = 100 * 1024 * 1024
 
 DEFAULT_ROOTS = ("~/Documents", "~/Downloads")
 
+# Build output. Not excluded by name alone, because the files inside are often
+# named after the packages they bundle rather than living under node_modules.
+DEFAULT_EXCLUDED_BUILD_DIRS = (
+    ".next", ".nuxt", ".svelte-kit", "dist", "build", "out", "target",
+    "coverage", ".parcel-cache", ".turbo", ".output",
+)
+
 # Directory names that are never a user's documents. Skipped by name at any
 # depth, which is what keeps a single node_modules from costing minutes.
 DEFAULT_EXCLUDED_DIRS = (
     "node_modules", ".git", "Library", "Caches", ".cache", "venv", ".venv",
     "__pycache__", ".Trash", "site-packages", ".terraform", "DerivedData",
     ".ssh", ".gnupg", ".aws", ".kube", ".docker",
+    *DEFAULT_EXCLUDED_BUILD_DIRS,
 )
 
 # Bundles are directories that macOS presents as files. Descending into one
@@ -57,6 +65,20 @@ DEFAULT_EXCLUDED_EXTENSIONS = (
     ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
     ".mp3", ".wav", ".aiff", ".flac", ".m4a",
     ".so", ".dylib", ".o", ".a", ".class", ".pyc", ".bin", ".exe",
+)
+
+# What counts as a document. An allowlist, not a filter on "is it text": every
+# build directory holds thousands of files that are technically text and are not
+# documents by any reading — one bundled fontawesome.js produced 718 chunks, and
+# minified libraries came to a fifth of everything waiting to be embedded.
+#
+# These are the formats the index was asked for, plus HTML, which is a document
+# format once it is read as text rather than as source.
+DOCUMENT_EXTENSIONS = (
+    ".pdf", ".docx", ".doc", ".txt", ".md", ".markdown", ".rtf", ".rtfd",
+    ".pages", ".numbers", ".key", ".odt", ".epub", ".csv",
+    ".html", ".htm", ".xhtml",
+    ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".heic", ".webp", ".gif", ".bmp",
 )
 
 # Files whose contents are secrets. Indexing them would put credentials into a
@@ -139,7 +161,10 @@ class FileConnector:
     def is_secret(self, path: Path) -> bool:
         """Whether this looks like credentials rather than a document."""
         name = path.name.lower()
-        if name in DEFAULT_EXCLUDED_NAMES:
+        # Stem as well as full name: saving a key as id_rsa.txt or a dump as
+        # credentials.pdf is exactly how one of these ends up looking like a
+        # document, and an exact-name check would wave it through.
+        if name in DEFAULT_EXCLUDED_NAMES or path.stem.lower() in DEFAULT_EXCLUDED_NAMES:
             return True
         if name.endswith(DEFAULT_SECRET_SUFFIXES):
             return True
@@ -166,6 +191,10 @@ class FileConnector:
             return "type"
         if self.is_secret(path):
             return "secret"
+        # The allowlist is last: a name that got this far is still only indexed
+        # if it is a kind of document, not merely a kind of text.
+        if not name.endswith(DOCUMENT_EXTENSIONS):
+            return "type"
         return None
 
     # --- the walk ----------------------------------------------------------
