@@ -252,10 +252,16 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             content={"error": {"code": exc.code, "message": exc.message}},
         )
 
-    def connection() -> sqlite3.Connection:
+    def require_db() -> None:
+        """Guard only. The connection is opened inside the endpoint, on purpose.
+
+        A sync dependency and a sync endpoint are two separate dispatches into
+        the threadpool, so a connection built here can be handed to a different
+        thread than the one that uses it — which sqlite3 refuses, intermittently
+        and only under load. Whatever runs the query has to open it.
+        """
         if not Path(cfg.db_path).exists():
             raise ApiError(503, "unavailable", f"No database at {cfg.db_path}; run `muster init`.")
-        return _connection(cfg)
 
     @app.get("/search")
     def search(
@@ -266,8 +272,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         until: str | None = None,
         min_score: float | None = None,
         all_categories: bool = False,
-        conn: sqlite3.Connection = Depends(connection),
+        _db: None = Depends(require_db),
     ) -> dict:
+        conn = _connection(cfg)
         started = time.perf_counter()
         excluded = frozenset() if all_categories else DEFAULT_EXCLUDED
         params: dict[str, Any] = {
@@ -319,7 +326,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         }
 
     @app.get("/doc/{doc_id}")
-    def doc(doc_id: int, conn: sqlite3.Connection = Depends(connection)) -> dict:
+    def doc(doc_id: int, _db: None = Depends(require_db)) -> dict:
+        conn = _connection(cfg)
         row = conn.execute("SELECT * FROM docs WHERE id = ?", (doc_id,)).fetchone()
         if row is None:
             raise ApiError(404, "not_found", f"No document {doc_id}.")
@@ -388,7 +396,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         doc_id: int,
         download: bool = False,
         request: Request = None,  # type: ignore[assignment]
-        conn: sqlite3.Connection = Depends(connection),
+        _db: None = Depends(require_db),
     ) -> Response:
         """The bytes of an indexed file, read from where it lives on disk.
 
@@ -396,6 +404,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         takes a document id, so there is no string a client could supply that
         would make it read something that was not indexed.
         """
+        conn = _connection(cfg)
         row = conn.execute("SELECT * FROM docs WHERE id = ?", (doc_id,)).fetchone()
         if row is None or not _is_filesystem_doc(row, _meta(row)):
             raise ApiError(404, "not_found", f"No file document {doc_id}.")
@@ -429,7 +438,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     def thumb(
         doc_id: int,
         size: int = Query(96, ge=16, le=512),
-        conn: sqlite3.Connection = Depends(connection),
+        _db: None = Depends(require_db),
     ) -> Response:
         """A small preview image for a document, or 404 when there is none.
 
@@ -437,6 +446,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         page of the actual document is worth far more than a generic file icon,
         and the whole cost is one PNG the size of a favicon.
         """
+        conn = _connection(cfg)
         row = conn.execute("SELECT * FROM docs WHERE id = ?", (doc_id,)).fetchone()
         if row is None:
             raise ApiError(404, "not_found", f"No document {doc_id}.")
@@ -459,8 +469,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         content_hash: str,
         download: bool = False,
         request: Request = None,  # type: ignore[assignment]
-        conn: sqlite3.Connection = Depends(connection),
+        _db: None = Depends(require_db),
     ) -> Response:
+        conn = _connection(cfg)
         # Validate before touching the filesystem: this is the only endpoint
         # that turns a caller-supplied string into a path.
         try:
@@ -532,9 +543,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             }
 
     @app.get("/status")
-    def status(conn: sqlite3.Connection = Depends(connection)) -> dict:
+    def status(_db: None = Depends(require_db)) -> dict:
         from muster.embed import count_pending
         from muster.evaluate import corpus_fingerprint
+
+        conn = _connection(cfg)
 
         def scalar(sql: str, *args) -> Any:
             return conn.execute(sql, args).fetchone()[0]

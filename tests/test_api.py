@@ -574,3 +574,34 @@ def test_hits_declare_whether_a_preview_exists(client) -> None:
         assert isinstance(hit["preview"], bool)
         if hit["preview"]:
             assert (hit["mime"] or "").startswith("image/") or hit["mime"] == "application/pdf"
+
+
+def test_every_endpoint_opens_its_own_connection(client) -> None:
+    """A sqlite connection must not cross threads.
+
+    A sync dependency and a sync endpoint are two separate dispatches into the
+    threadpool, so a connection built in a dependency can be handed to a
+    different thread than the one that uses it. sqlite3 refuses that — and only
+    sometimes, because the pool usually reuses the same thread, which is how it
+    reached production as intermittent 500s on search.
+    """
+    import inspect
+
+    import muster.api as api_module
+
+    source = inspect.getsource(api_module.create_app)
+    assert "Depends(connection)" not in source, (
+        "an endpoint takes its connection from a dependency again"
+    )
+
+
+def test_search_survives_being_hit_from_many_threads(client) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def once(i: int) -> int:
+        return client.get("/search", params={"q": f"lease {i}", "limit": 3}).status_code
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        codes = list(pool.map(once, range(24)))
+
+    assert set(codes) == {200}, f"a request failed under concurrency: {codes}"
