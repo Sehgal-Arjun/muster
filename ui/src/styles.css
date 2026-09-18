@@ -453,3 +453,12 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
   background: rgba(255, 255, 255, 0.06);
 }
 .row.selected .thumb { border-color: var(--accent); }
+
+/* A single-arm mode is a temporary experiment. Left looking like the default it
+   silently degrades every later search, which is exactly how one went unnoticed
+   long enough to look like a missing document. */
+.mode-narrowed {
+  color: #ffcf70;
+  border-color: rgba(255, 207, 112, 0.4);
+  background: rgba(255, 207, 112, 0.12);
+}

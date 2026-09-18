@@ -126,6 +126,11 @@ export default function App() {
       setQuery("");
       setResponse(null);
       setStack([]);
+      // Back to the default mode too. Keyword and vector are experiments you
+      // run on one query, not preferences — and a mode that survives the panel
+      // closing is a trap: every later search is quietly worse, with a word in
+      // the footer as the only clue. Hybrid finds what the others do and more.
+      setMode("hybrid");
       focus();
       void refresh();
     };

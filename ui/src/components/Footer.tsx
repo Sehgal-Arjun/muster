@@ -62,7 +62,12 @@ export function Footer({
         {/* Deliberately small and unlabelled-until-hovered: a refresh happens
             on every summon and must not read as something needing attention. */}
         {syncing && <span className="syncing" title="checking for new mail" />}
-        <span className="mode">{mode}</span>
+        {/* Marked when it is not the default, because a single-arm mode is a
+            temporary thing and looks identical to normal otherwise. */}
+        <span className={`mode${mode === "hybrid" ? "" : " mode-narrowed"}`}
+              title={mode === "hybrid" ? undefined : `${mode} only — ⌘1 for hybrid`}>
+          {mode}
+        </span>
       </div>
     </footer>
   );
