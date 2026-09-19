@@ -37,6 +37,13 @@ export default function App() {
   // Needed to turn a content hash into a path Finder can reveal. Fetched once;
   // a search should never wait on it.
   const [blobDir, setBlobDir] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+  /**
+   * False for the few seconds after the server restarts, while bge-m3 loads.
+   * The first search then takes ~25s, and without saying so the panel draws an
+   * empty list — which reads as "nothing found" rather than "not ready yet".
+   */
+  const [modelReady, setModelReady] = useState(true);
   /**
    * What is showing instead of the results, innermost last.
    *
@@ -153,7 +160,13 @@ export default function App() {
       setBlobDir(mockStatus.blob_dir);
       return;
     }
-    api.status().then((s) => setBlobDir(s.blob_dir)).catch(() => {});
+    api
+      .status()
+      .then((s) => {
+        setBlobDir(s.blob_dir);
+        setModelReady(s.embedding.ready !== false);
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -165,6 +178,7 @@ export default function App() {
     }
     const ticket = ++latest.current;
     const timer = setTimeout(async () => {
+      setSearching(true);
       try {
         const body = USE_MOCK
           ? mockSearchFor(q)
@@ -177,6 +191,8 @@ export default function App() {
         if (ticket !== latest.current) return;
         setResponse(null);
         setError(cause instanceof ApiError ? cause.message : String(cause));
+      } finally {
+        if (ticket === latest.current) setSearching(false);
       }
     }, DEBOUNCE_MS);
     return () => clearTimeout(timer);
@@ -446,7 +462,22 @@ export default function App() {
           <EmptyState reason={response.empty_reason} onRetry={setOverride} />
         )}
 
-        {hits.length === 0 && !response && !error && (
+        {/* A search in flight is not an empty result list. Drawing one is how
+            a slow first query — the model loading after a restart — became
+            indistinguishable from a document that was not there. */}
+        {hits.length === 0 && !response && !error && searching && (
+          <div className="empty">
+            <div className="empty-headline">Searching…</div>
+            {!modelReady && (
+              <div className="empty-detail dim">
+                First search since the server started — loading the embedding
+                model. This one is slow; the rest are not.
+              </div>
+            )}
+          </div>
+        )}
+
+        {hits.length === 0 && !response && !error && !searching && (
           <div className="empty">
             <div className="empty-headline">Muster</div>
             <div className="empty-detail dim">Start typing.</div>

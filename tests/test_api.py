@@ -605,3 +605,23 @@ def test_search_survives_being_hit_from_many_threads(client) -> None:
         codes = list(pool.map(once, range(24)))
 
     assert set(codes) == {200}, f"a request failed under concurrency: {codes}"
+
+
+def test_status_reports_whether_the_model_is_loaded(client) -> None:
+    """The panel needs to distinguish "slow" from "found nothing"."""
+    body = client.get("/status").json()
+    assert "ready" in body["embedding"]
+    assert isinstance(body["embedding"]["ready"], bool)
+
+
+def test_warming_sets_ready_even_when_the_model_cannot_load(cfg, monkeypatch) -> None:
+    """Waiting forever on a failed load helps nobody; keyword search is fine."""
+    import muster.api as api_module
+
+    api_module._model_ready.clear()
+    monkeypatch.setattr(
+        "muster.embed.load_model",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no model here")),
+    )
+    api_module._warm_model(cfg)
+    assert api_module._model_ready.is_set()

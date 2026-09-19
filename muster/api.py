@@ -21,6 +21,7 @@ import logging
 import sqlite3
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -50,6 +51,35 @@ _local = threading.local()
 # the lock — not this dict — is what actually stops two syncs colliding.
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
+
+# Whether the embedding model is resident. The first vector query otherwise
+# pays ~25s to load bge-m3, during which the panel has nothing to show and looks
+# exactly like a search that found nothing.
+_model_ready = threading.Event()
+
+
+def _warm_model(cfg: Config) -> None:
+    """Load the embedding model in the background at startup.
+
+    A search box that takes 25 seconds to answer its first question is not a
+    search box. This moves that cost to a moment when nobody is waiting — and
+    /status reports it, so the panel can say "starting up" rather than draw an
+    empty result list.
+    """
+    try:
+        from muster.embed import encode_query, load_model
+
+        model = load_model(cfg.embed.model_id, cfg.embed.device)
+        # Loaded is not ready. Metal compiles its kernels on the first inference,
+        # so a model that has been read off disk but never run still costs most
+        # of a minute on the query that happens to be first. Run one here.
+        encode_query(model, "warm", cfg.embed.model_id)
+    except Exception as exc:  # noqa: BLE001 — keyword search works regardless
+        log.warning("could not preload %s: %s", cfg.embed.model_id, exc)
+    finally:
+        # Set either way: waiting on a load that failed helps nobody, and
+        # keyword search does not need it.
+        _model_ready.set()
 
 
 def _run_sync_job(cfg: Config, job_id: str) -> None:
@@ -231,7 +261,15 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     cfg = cfg or load_config()
     store = BlobStore(cfg.blob_dir)
 
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Load the embedding model off the request path. Started here rather
+        # than on first use so the cost lands when nobody is waiting.
+        threading.Thread(target=_warm_model, args=(cfg,), daemon=True, name="warm").start()
+        yield
+
     app = FastAPI(
+        lifespan=lifespan,
         title="Muster",
         version="0.1.0",
         summary="Read-only HTTP access to a local mail index.",
@@ -602,6 +640,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "date_range": {"earliest": earliest, "latest": latest},
             "embedding": {
                 "model_id": cfg.embed.model_id,
+                # False for the first few seconds after a restart. The panel
+                # uses it to say why a search is slow instead of showing an
+                # empty list.
+                "ready": _model_ready.is_set(),
                 "dimensions": _vector_dimensions(conn, cfg.embed.model_id),
             },
             "search_defaults": {

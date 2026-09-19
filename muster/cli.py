@@ -778,6 +778,55 @@ def embed(
 
 
 @app.command()
+def doctor(
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show every check, not only problems.")
+    ] = False,
+) -> None:
+    """Check whether anything is quietly broken."""
+    from muster import doctor as checks
+
+    cfg = load_config()
+    _require_db(cfg)
+    conn = db.connect(cfg.db_path)
+    try:
+        report = checks.run(cfg, conn)
+    finally:
+        conn.close()
+
+    mark = {checks.OK: ("  ok  ", typer.colors.GREEN),
+            checks.WARN: (" warn ", typer.colors.YELLOW),
+            checks.FAIL: (" fail ", typer.colors.RED)}
+
+    for finding in report.findings:
+        if not verbose and not finding.bad:
+            continue
+        label, colour = mark[finding.status]
+        typer.echo(
+            f"{typer.style(label, fg=colour, bold=True)}  "
+            f"{finding.name:<22} {finding.detail}"
+        )
+        if finding.remedy:
+            typer.echo(f"{'':8}{'':22} {typer.style('-> ' + finding.remedy, fg=typer.colors.BLUE)}")
+
+    problems = report.problems
+    typer.echo()
+    if not problems:
+        typer.echo(typer.style(f"nothing wrong ({len(report.findings)} checks)", fg=typer.colors.GREEN))
+        return
+    typer.echo(
+        typer.style(
+            f"{len(problems)} of {len(report.findings)} checks need attention",
+            fg=typer.colors.YELLOW if report.worst == checks.WARN else typer.colors.RED,
+        )
+    )
+    if not verbose:
+        typer.echo("  -v shows the checks that passed too")
+    # Non-zero so this can gate a script without parsing the output.
+    raise typer.Exit(1 if report.worst == checks.FAIL else 0)
+
+
+@app.command()
 def pause() -> None:
     """Stop background work: scheduled syncs, and any embedding in flight."""
     from muster import pausing

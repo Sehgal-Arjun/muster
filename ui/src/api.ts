@@ -146,7 +146,7 @@ export interface StatusResponse {
   by_kind: Record<string, number>;
   by_category: Record<string, number>;
   date_range: { earliest: string | null; latest: string | null };
-  embedding: { model_id: string; dimensions: number | null };
+  embedding: { model_id: string; dimensions: number | null; ready?: boolean };
   search_defaults: { modes: Mode[]; default_mode: Mode; excluded_categories: string[] };
   corpus_fingerprint: string;
 }
