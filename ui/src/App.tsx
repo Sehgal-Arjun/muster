@@ -26,8 +26,30 @@ const DEBOUNCE_MS = 120;
  */
 const REFRESH_EVERY_MS = 2 * 60 * 1000;
 
+/**
+ * The last search, kept across restarts of the app itself.
+ *
+ * In-memory state already survives the panel being hidden, because the webview
+ * is not remounted. This is for the other case — a reboot, a rebuild, a crash —
+ * where the alternative is an empty box and no idea what you last asked.
+ *
+ * Only the question is stored — never the answers, which go stale and cost
+ * about half a second to ask for again, and never the mode, which resets.
+ */
+const LAST_SEARCH = "muster.lastSearch";
+
+function restoreQuery(): string {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LAST_SEARCH) ?? "");
+    return typeof saved?.query === "string" ? saved.query : "";
+  } catch {
+    // Nothing saved, or saved by an older version. Not worth reporting.
+    return "";
+  }
+}
+
 export default function App() {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(restoreQuery);
   const [mode, setMode] = useState<Mode>("hybrid");
   const [response, setResponse] = useState<SearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -127,18 +149,22 @@ export default function App() {
       requestAnimationFrame(() => inputRef.current?.focus());
     };
     const summoned = () => {
-      // Every summon is a fresh prompt. Dismissing with the hotkey hides the
-      // panel from Rust without running hide() below, so without this it comes
-      // back still holding the last query and its results.
-      setQuery("");
-      setResponse(null);
-      setStack([]);
-      // Back to the default mode too. Keyword and vector are experiments you
-      // run on one query, not preferences — and a mode that survives the panel
-      // closing is a trap: every later search is quietly worse, with a word in
-      // the footer as the only clue. Hybrid finds what the others do and more.
+      // The last search is still there. Closing the panel to go and read
+      // something is not the same as being finished with what you looked up,
+      // and retyping it is a small tax on the most common thing anyone does.
+      //
+      // Selected rather than cleared, so typing still replaces it in one
+      // keystroke — you get the result back if you want it, and pay nothing if
+      // you don't.
+      requestAnimationFrame(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      });
+      // The question is kept; the mode is not. Keyword and vector are
+      // experiments you run on one query, and one left switched on made every
+      // later search quietly worse with a word in the footer as the only clue.
+      // Carrying that across summons is the bug, not the feature.
       setMode("hybrid");
-      focus();
       void refresh();
     };
     // Only focus, not clear: regaining focus by clicking the panel back to the
@@ -202,17 +228,22 @@ export default function App() {
   useEffect(() => setOverride(null), [query, mode]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(LAST_SEARCH, JSON.stringify({ query }));
+    } catch {
+      // A full or disabled store is not a reason to break searching.
+    }
+  }, [query]);
+
+  useEffect(() => {
     listRef.current
       ?.querySelector<HTMLElement>(".row.selected")
       ?.scrollIntoView({ block: "nearest" });
   }, [selected]);
 
   const hide = useCallback(async () => {
-    // Clear on the way out so the next summon is a fresh prompt rather than
-    // whatever was left behind.
-    setQuery("");
-    setResponse(null);
-    setStack([]);
+    // Deliberately keeps the query, the results and any open document. What was
+    // on screen is what should be there on the way back in.
     if (USE_MOCK) return;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
