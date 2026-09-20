@@ -10,7 +10,17 @@
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:webview:allow-internal-toggle-devtools",
-    "opener:allow-open-url",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://mail.google.com/*"
+        },
+        {
+          "url": "http://127.0.0.1:8765/*"
+        }
+      ]
+    },
     {
       "identifier": "opener:allow-open-path",
       "allow": [

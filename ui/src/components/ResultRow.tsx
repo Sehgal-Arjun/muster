@@ -45,6 +45,7 @@ export function ResultRow({
   hit: Hit;
   selected: boolean;
   onSelect: () => void;
+  /** Read it here — the same thing Enter does. */
   onOpen: () => void;
 }) {
   const copies = hit.sources.length;
@@ -54,6 +55,8 @@ export function ResultRow({
     <li
       className={`row${selected ? " selected" : ""}`}
       onMouseMove={onSelect}
+      // A single click, not a double: this is a launcher list, and the row is
+      // the button.
       onClick={onOpen}
       // Selection is driven by the keyboard; the list itself is the widget.
       aria-selected={selected}

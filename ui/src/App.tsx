@@ -499,7 +499,11 @@ export default function App() {
                 hit={hit}
                 selected={i === selected}
                 onSelect={() => setSelected(i)}
-                onOpen={() => void open(hit)}
+                // Clicking a result reads it, exactly as Enter does. Sending
+                // the reader straight out to Preview or Gmail skips the view
+                // built for the purpose, and is not what a click means anywhere
+                // else in a list.
+                onOpen={() => read(hit)}
               />
             ))}
           </ul>
