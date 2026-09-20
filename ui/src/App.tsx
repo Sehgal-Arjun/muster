@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, api, type Hit, type Mode, type SearchResponse } from "./api";
+import { ApiError, api, type DocResponse, type Hit, type Mode, type SearchResponse } from "./api";
 import { mockSearchFor, mockStatus } from "./mock";
 import { Actions, type Action } from "./components/Actions";
 import { DocView, type View } from "./components/DocView";
@@ -74,6 +74,8 @@ export default function App() {
    * way out to the list.
    */
   const [stack, setStack] = useState<View[]>([]);
+  // What the document view is showing, so the footer can name the keys for it.
+  const [openDoc, setOpenDoc] = useState<DocResponse | null>(null);
   const [syncing, setSyncing] = useState(false);
   // When the last refresh was asked for, so summoning the panel repeatedly does
   // not mean a request each time.
@@ -307,8 +309,16 @@ export default function App() {
         return;
       }
       try {
-        const { path, url } = await locate(hit);
         const opener = await import("@tauri-apps/plugin-opener");
+        if (hit.kind === "message" && hit.source === "gmail") {
+          const id = hit.sources[0]?.source_uid.split("#")[0];
+          if (id) {
+            await opener.openUrl(`https://mail.google.com/mail/u/0/#all/${id}`);
+            await hide();
+            return;
+          }
+        }
+        const { path, url } = await locate(hit);
         if (path) await opener.openPath(path);
         else if (url) await opener.openUrl(api.bytesUrl(url));
         else return;
@@ -334,8 +344,13 @@ export default function App() {
         return;
       }
       try {
-        // The real file if there is one; the stored blob otherwise. Revealing a
-        // blob path for a document that never had one lands Finder nowhere.
+        // Mail has no file to reveal. Its blob is a content-addressed .eml in a
+        // directory that means nothing to a reader, so it opens where it
+        // actually lives instead.
+        if (hit.kind === "message" && hit.source === "gmail") {
+          await open(hit);
+          return;
+        }
         const { path } = await locate(hit);
         const target =
           path ?? (hit.content_hash && blobDir ? api.blobPath(blobDir, hit.content_hash) : null);
@@ -347,7 +362,7 @@ export default function App() {
         setError(`Could not reveal: ${cause}`);
       }
     },
-    [blobDir, hide, locate],
+    [blobDir, hide, locate, open],
   );
 
   const actions: Action[] = useMemo(() => {
@@ -472,6 +487,7 @@ export default function App() {
             blobDir={blobDir}
             onOpen={(next) => setStack((current) => [...current, next])}
             onExit={back}
+            onDoc={setOpenDoc}
           />
         ) : (
         <>
@@ -528,7 +544,14 @@ export default function App() {
         )}
       </div>
 
-      <Footer response={response} mode={mode} error={error} reading={reading} syncing={syncing} />
+      <Footer
+          response={response}
+          mode={mode}
+          error={error}
+          reading={reading}
+          readingMail={openDoc?.mime === "message/rfc822"}
+          syncing={syncing}
+        />
 
       {showActions && (
         <Actions hit={current} actions={actions} onClose={() => setShowActions(false)} />

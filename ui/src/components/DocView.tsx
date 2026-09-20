@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api, type Attachment, type DocResponse } from "../api";
 import { mockDoc, mockFileDoc } from "../mock";
 import { Highlight, queryTerms } from "./Highlight";
+import { MessageBody } from "./MessageBody";
 import { Icon } from "./Icon";
 
 const USE_MOCK = import.meta.env.VITE_USE_MOCK === "1";
@@ -17,6 +18,7 @@ export type View =
   | { kind: "blob"; hash: string; mime: string | null; filename: string | null };
 
 const isPdf = (mime: string | null) => !!mime?.includes("pdf");
+const isMessageDoc = (doc: DocResponse | null) => doc?.mime === "message/rfc822";
 const isImage = (mime: string | null) => !!mime?.startsWith("image/");
 
 function bytes(n: number | null | undefined): string {
@@ -40,6 +42,20 @@ function longDate(iso: string | null): string {
         weekday: "short", day: "numeric", month: "short", year: "numeric",
         hour: "numeric", minute: "2-digit",
       });
+}
+
+/**
+ * Where a message can be opened in a browser, or null if it cannot.
+ *
+ * Gmail's own ids are what the connector stores, and its web client addresses
+ * messages by exactly that — so a document here maps to a URL with no lookup.
+ * Attachment documents carry a `#att` suffix, which names the part rather than
+ * the message, so it comes off.
+ */
+function webmailUrl(doc: DocResponse): string | null {
+  if (doc.source !== "gmail") return null;
+  const id = doc.source_uid.split("#")[0];
+  return id ? `https://mail.google.com/mail/u/0/#all/${id}` : null;
 }
 
 /** The last path segment, which is the part a reader is actually looking for. */
@@ -69,6 +85,7 @@ export function DocView({
   blobDir,
   onOpen,
   onExit,
+  onDoc,
 }: {
   view: View;
   /** The query that produced this document, for highlighting. */
@@ -76,12 +93,17 @@ export function DocView({
   blobDir: string | null;
   onOpen: (next: View) => void;
   onExit: () => void;
+  /** So the footer can name the keys accurately for what is on screen. */
+  onDoc?: (doc: DocResponse | null) => void;
 }) {
   const [doc, setDoc] = useState<DocResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   // null means "reading the body"; a number selects an attachment.
   const [attachSel, setAttachSel] = useState<number | null>(null);
+  // Set when a message turns out to have no HTML part; the indexed text is
+  // then the only thing there is to show.
+  const [plainOnly, setPlainOnly] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const terms = useMemo(() => queryTerms(query), [query]);
@@ -92,6 +114,7 @@ export function DocView({
     setDoc(null);
     setError(null);
     setAttachSel(null);
+    setPlainOnly(false);
     if (view.kind !== "doc") return;
     if (USE_MOCK) {
       setDoc(view.id === mockFileDoc.id ? mockFileDoc : mockDoc);
@@ -99,14 +122,18 @@ export function DocView({
     }
     api
       .doc(view.id)
-      .then((body) => live && setDoc(body))
+      .then((body) => {
+        if (!live) return;
+        setDoc(body);
+        onDoc?.(body);
+      })
       .catch((cause) =>
         live && setError(cause instanceof ApiError ? cause.message : String(cause)),
       );
     return () => {
       live = false;
     };
-  }, [view]);
+  }, [view, onDoc]);
 
   // Jump to the first match, so a hit buried on page four is not something the
   // reader has to go hunting for. Falls back to the top when nothing matched.
@@ -144,20 +171,29 @@ export function DocView({
     [blobDir],
   );
 
-  /** Hand it to whatever owns the type — Preview for a PDF, Photos for an image. */
+  /**
+   * Hand it to whatever owns it.
+   *
+   * A file opens in Preview, from its real path rather than a copy in the blob
+   * store. A message opens where it actually lives — in Gmail — because the
+   * blob is a .eml nobody asked for and revealing it in Finder shows a
+   * content-addressed filename in a directory that means nothing to a reader.
+   */
   const openExternally = useCallback(async () => {
     try {
       const opener = await import("@tauri-apps/plugin-opener");
-      // The real file where there is one: opening the path puts the reader in
-      // Preview with their own document, not with a copy out of a blob store.
-      if (doc?.provenance?.path) await opener.openPath(doc.provenance.path);
+      const web = doc ? webmailUrl(doc) : null;
+      if (web) await opener.openUrl(web);
+      else if (doc?.provenance?.path) await opener.openPath(doc.provenance.path);
       else if (doc?.blob) await opener.openUrl(api.bytesUrl(doc.blob.url));
       else return;
-      setFlash("Opened");
+      setFlash(web ? "Opened in Gmail" : "Opened");
     } catch (cause) {
       setFlash(`Could not open: ${cause}`);
     }
   }, [doc]);
+
+  const onPlainOnly = useCallback(() => setPlainOnly(true), []);
 
   const preview = useCallback(
     (attachment: Attachment) => {
@@ -200,9 +236,13 @@ export function DocView({
         event.preventDefault();
         const selected = attachSel != null ? attachments[attachSel] : null;
         if (meta) {
+          // Revealing a message shows a content-addressed .eml in a directory
+          // that means nothing; opening it where it lives is what was wanted.
           void (selected
             ? reveal(selected.content_hash)
-            : reveal(doc?.blob?.hash ?? null, doc?.provenance?.path));
+            : isMessageDoc(doc)
+              ? openExternally()
+              : reveal(doc?.blob?.hash ?? null, doc?.provenance?.path));
         } else if (selected) {
           preview(selected);
         }
@@ -262,6 +302,7 @@ export function DocView({
   if (!doc) return <div className="doc doc-loading dim">Loading…</div>;
 
   const provenance = doc.provenance;
+  const isMessage = doc.mime === "message/rfc822" && !!doc.blob;
   const showPdf = isPdf(doc.mime) && doc.blob;
   const showImage = isImage(doc.mime) && doc.blob;
 
@@ -383,7 +424,11 @@ export function DocView({
               document is. Showing it in place of a PDF hands the reader a
               stripped transcription of their own CV — layout gone, ordering
               mangled — when the real thing renders perfectly well. */}
-          {!showPdf && !showImage &&
+          {isMessage && !plainOnly && (
+            <MessageBody docId={doc.id} onFallback={onPlainOnly} />
+          )}
+
+          {!showPdf && !showImage && (!isMessage || plainOnly) &&
             (doc.text.trim() ? (
               <article className="doc-body">
                 <Highlight text={doc.text} terms={terms} />

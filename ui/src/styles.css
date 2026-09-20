@@ -462,3 +462,15 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
   border-color: rgba(255, 207, 112, 0.4);
   background: rgba(255, 207, 112, 0.12);
 }
+
+/* A message is shown on the white sheet it was designed against. Mail that is
+   aware of dark mode is rare, and forcing one turns half of it into black text
+   on black. */
+.mail-frame {
+  display: block;
+  width: 100%;
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}

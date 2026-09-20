@@ -160,6 +160,14 @@ export interface SyncJob {
   started?: boolean;
 }
 
+/** A message as it was sent, sanitised for display. */
+export interface MessageBody {
+  is_html: boolean;
+  html: string;
+  /** Remote images dropped — a pixel that fails to load has still been asked for. */
+  images_removed: number;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly code: string,
@@ -231,6 +239,7 @@ export const api = {
   }) => get<SearchResponse>("/search", params),
 
   doc: (id: number) => get<DocResponse>(`/doc/${id}`),
+  body: (id: number) => get<MessageBody>(`/doc/${id}/body`),
 
   /** Start an incremental sync. Returns at once; poll syncJob for the outcome. */
   refresh: () => post<SyncJob>("/sync/refresh"),

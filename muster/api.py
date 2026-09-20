@@ -429,6 +429,36 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "copies": copies,
         }
 
+    @app.get("/doc/{doc_id}/body")
+    def doc_body(doc_id: int, _db: None = Depends(require_db)) -> dict:
+        """The message as it was sent, rather than as it was indexed.
+
+        Indexed text is mangled on purpose for retrieval — links reduced to bare
+        domains, navigation flattened into prose — which reads as a wall of
+        repeated hostnames where a message used to be. The original is still in
+        the blob store, so it can be shown properly.
+        """
+        conn = _connection(cfg)
+        row = conn.execute("SELECT * FROM docs WHERE id = ?", (doc_id,)).fetchone()
+        if row is None:
+            raise ApiError(404, "not_found", f"No document {doc_id}.")
+        if row["mime"] != "message/rfc822" or not row["blob_path"]:
+            return {"is_html": False, "html": "", "images_removed": 0}
+
+        from muster import mailhtml
+
+        try:
+            rendered = mailhtml.render(store.get_blob(row["blob_path"]))
+        except (BlobNotFound, OSError) as exc:
+            raise ApiError(410, "gone", f"The stored message is unreadable ({exc}).") from exc
+
+        return {
+            "is_html": rendered.is_html,
+            "html": rendered.html,
+            # Reported so the reader knows something was withheld, and why.
+            "images_removed": rendered.images_removed,
+        }
+
     @app.get("/file/{doc_id}")
     def file_bytes(
         doc_id: int,

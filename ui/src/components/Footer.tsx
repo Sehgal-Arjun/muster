@@ -10,6 +10,16 @@ const SEARCH_HINTS: Array<[string, string]> = [
   ["esc", "close"],
 ];
 
+// A message has no file on disk, so revealing one shows a content-addressed
+// .eml in a directory that means nothing. Both keys open it where it lives.
+const MAIL_HINTS: Array<[string, string]> = [
+  ["↑↓ jk", "scroll"],
+  ["↵", "open attachment"],
+  ["⌘O", "open in Gmail"],
+  ["⌘C", "copy body"],
+  ["esc", "back"],
+];
+
 // Same keys, different meanings. Showing the search hints over a document
 // would be telling the reader the wrong thing.
 const READING_HINTS: Array<[string, string]> = [
@@ -26,18 +36,21 @@ export function Footer({
   mode,
   error,
   reading,
+  readingMail,
   syncing,
 }: {
   response: SearchResponse | null;
   mode: Mode;
   error: string | null;
   reading: boolean;
+  /** Mail has no file to reveal, so ⌘↵ means something else over a message. */
+  readingMail?: boolean;
   syncing: boolean;
 }) {
   return (
     <footer className="footer">
       <div className="hints">
-        {(reading ? READING_HINTS : SEARCH_HINTS).map(([key, label]) => (
+        {(reading ? (readingMail ? MAIL_HINTS : READING_HINTS) : SEARCH_HINTS).map(([key, label]) => (
           <span key={key} className="hint">
             <kbd>{key}</kbd>
             {label}
