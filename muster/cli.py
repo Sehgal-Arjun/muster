@@ -97,8 +97,9 @@ def schedule_install() -> None:
     """Install the launchd agent that syncs every 15 minutes."""
     from muster import scheduling
 
+    cfg = load_config()
     try:
-        path = scheduling.install()
+        path = scheduling.install(roots=cfg.files.roots)
     except RuntimeError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
@@ -107,7 +108,9 @@ def schedule_install() -> None:
         f"  every {scheduling.INTERVAL_SECONDS // 60} minutes, at background priority\n"
         f"  skipped on battery below {scheduling.BATTERY_FLOOR_PERCENT}%\n"
         f"  logs {scheduling.log_dir() / 'sync.log'}\n"
-        "  it will not wake the machine; it runs on the next wake instead"
+        "  it will not wake the machine; it runs on the next wake instead\n"
+        f"  also runs when {', '.join(cfg.files.roots)} change, so a deleted "
+        "file is noticed promptly"
     )
 
 
@@ -604,11 +607,15 @@ def sync_files(
     created = updated = moved = unchanged = empty = failed = 0
     chunks = 0
     by_date_source: dict[str, int] = {}
+    # Every path the walk produced, so anything under a root it read and did not
+    # produce can be concluded absent — and nothing else can.
+    seen_paths: set[str] = set()
 
     conn = db.connect(cfg.db_path)
     try:
         with sync_lock(cfg.lock_path):
             for record in connector.walk():
+                seen_paths.add(record.source_uid)
                 try:
                     result = ingest_file(conn, record, force=force)
                 except Exception as exc:  # noqa: BLE001 — one file, not the walk
@@ -641,6 +648,21 @@ def sync_files(
         conn.close()
 
     stats = connector.stats
+
+    # Only when the walk was not limited to some subset of the roots, and only
+    # against roots it actually read.
+    marked = restored = trashed = 0
+    if not roots:
+        from muster.missing import sweep_files
+
+        conn = db.connect(cfg.db_path)
+        try:
+            marked, restored, trashed = sweep_files(
+                conn, [Path(r) for r in stats.roots_read], seen_paths=seen_paths
+            )
+        finally:
+            conn.close()
+
     typer.echo(
         f"\n{stats.seen} files seen"
         f"\n  {stats.excluded_type} skipped: not indexable"
@@ -655,6 +677,14 @@ def sync_files(
         f"\n  {failed} failed"
         f"\n{chunks} chunks"
     )
+    if marked:
+        where = f", {trashed} of them in the Trash" if trashed else ""
+        typer.echo(
+            f"  {marked} no longer on disk{where} — hidden from search, still on record"
+            "\n    muster purge --missing   removes them for good"
+        )
+    if restored:
+        typer.echo(f"  {restored} came back and are searchable again")
     if empty:
         typer.echo(f"  {empty} had no extractable text (indexed as metadata only)")
     if by_date_source:
@@ -1007,6 +1037,13 @@ def purge(
             help="Purge mail from every sender on the config exclusion list.",
         ),
     ] = False,
+    missing: Annotated[
+        bool,
+        typer.Option(
+            "--missing",
+            help="Purge documents whose original has gone (deleted, trashed, or unreachable).",
+        ),
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would go, change nothing.")
     ] = False,
@@ -1030,10 +1067,12 @@ def purge(
         try:
             preview = purge_plan(
                 conn, source=source, uid_prefix=uid_prefix, category=category,
-                sender_filter=sender_filter,
+                sender_filter=sender_filter, missing=missing,
             )
         except ValueError as exc:
-            typer.echo(f"{exc}. Pass --source, --uid-prefix or --category.", err=True)
+            typer.echo(
+                f"{exc}. Pass --source, --uid-prefix, --category or --missing.", err=True
+            )
             raise typer.Exit(1) from exc
 
         if preview.empty:
@@ -1061,6 +1100,7 @@ def purge(
         done = run_purge(
             conn, source=source, uid_prefix=uid_prefix, category=category,
             sender_filter=sender_filter,
+            missing=missing,
         )
     finally:
         conn.close()

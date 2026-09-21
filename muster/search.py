@@ -336,9 +336,16 @@ def _filter_clause(
     until: str | None,
     source: str | None,
     exclude_categories=None,
+    include_missing: bool = False,
 ) -> tuple[str, dict[str, object]]:
     sql = ""
     params: dict[str, object] = {}
+    if not include_missing:
+        # Documents whose original is gone stay in the database — an archive
+        # should not lose its record because a file moved — but they are not
+        # what someone is looking for, and offering one that cannot be opened
+        # is worse than not offering it.
+        sql += " AND d.missing_since IS NULL"
     if origin is not None:
         sql += " AND d.origin = :origin"
         params["origin"] = origin

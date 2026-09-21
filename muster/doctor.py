@@ -219,33 +219,19 @@ def check_file_roots(cfg: Config, report: Report) -> None:
 
 
 def check_missing_originals(conn: sqlite3.Connection, cfg: Config, report: Report) -> None:
-    """A file document is only as durable as the file. Report the drift."""
-    import json
+    """Documents whose original has gone, as recorded by a completed walk."""
+    marked = _scalar(conn, "SELECT count(*) FROM docs WHERE missing_since IS NOT NULL")
+    total = _scalar(conn, "SELECT count(*) FROM docs")
 
-    gone = 0
-    checked = 0
-    for (meta,) in conn.execute(
-        "SELECT meta_json FROM docs WHERE source = 'file' AND meta_json IS NOT NULL"
-    ):
-        try:
-            path = json.loads(meta).get("path")
-        except ValueError:
-            continue
-        if not path:
-            continue
-        checked += 1
-        if not Path(path).exists():
-            gone += 1
-
-    if gone:
+    if marked:
         report.add(
-            "file originals", WARN,
-            f"{gone} of {checked} indexed files are no longer on disk — "
-            "still searchable, but they cannot be opened",
-            "muster purge --uid-prefix <path>   to drop them",
+            "missing originals", OK,
+            f"{marked} of {total:,} document(s) no longer have their original — "
+            "hidden from search, still on record",
+            "muster purge --missing   removes them for good",
         )
     else:
-        report.add("file originals", OK, f"all {checked} indexed files still present")
+        report.add("missing originals", OK, "every document still has its original")
 
 
 def check_sync_freshness(conn: sqlite3.Connection, report: Report) -> None:

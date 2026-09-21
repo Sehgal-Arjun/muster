@@ -254,3 +254,26 @@ def test_nothing_pending_means_the_model_is_never_loaded(monkeypatch, capsys) ->
 
     assert called == []
     assert "no chunks awaiting vectors" in capsys.readouterr().out
+
+
+def test_the_agent_watches_the_file_roots(tmp_path) -> None:
+    """A deleted file should be noticed when it happens, not up to 15 minutes on.
+
+    launchd does the watching, so this costs nothing while nothing changes and
+    needs no watcher process of ours.
+    """
+    (tmp_path / "Documents").mkdir()
+    spec = scheduling.plist(
+        __import__("pathlib").Path("/usr/local/bin/muster"),
+        (str(tmp_path / "Documents"), str(tmp_path / "does-not-exist")),
+    )
+    assert spec["WatchPaths"] == [str(tmp_path / "Documents")], (
+        "a root that does not exist must not be watched"
+    )
+    # The timer stays: WatchPaths is not recursive and catches only the top.
+    assert spec["StartInterval"] == scheduling.INTERVAL_SECONDS
+
+
+def test_no_watch_paths_when_there_are_no_roots() -> None:
+    spec = scheduling.plist(__import__("pathlib").Path("/usr/local/bin/muster"))
+    assert "WatchPaths" not in spec

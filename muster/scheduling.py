@@ -40,9 +40,9 @@ def muster_binary() -> Path:
     return Path(sys.executable).parent / "muster"
 
 
-def plist(binary: Path) -> dict:
+def plist(binary: Path, roots: tuple[str, ...] = ()) -> dict:
     logs = log_dir()
-    return {
+    spec = {
         "Label": LABEL,
         "ProgramArguments": [str(binary), "schedule", "run"],
         # Fires this often while awake. Deliberately NOT StartCalendarInterval:
@@ -62,15 +62,28 @@ def plist(binary: Path) -> dict:
         "ThrottleInterval": 60,
     }
 
+    # Deleting a file should be noticed when it happens, not up to fifteen
+    # minutes later. launchd watches the directories itself, so this costs
+    # nothing while nothing changes and needs no watcher process of our own.
+    #
+    # Not recursive — launchd watches the named directories only — so a change
+    # deep in a tree still waits for the timer. It catches the common case:
+    # things are added to and removed from the top of Documents and Downloads.
+    watched = [str(Path(root).expanduser()) for root in roots]
+    watched = [path for path in watched if Path(path).is_dir()]
+    if watched:
+        spec["WatchPaths"] = watched
+    return spec
 
-def install(binary: Path | None = None) -> Path:
+
+def install(binary: Path | None = None, roots: tuple[str, ...] = ()) -> Path:
     """Write and load the agent. Safe to re-run."""
     binary = binary or muster_binary()
     path = agent_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     log_dir().mkdir(parents=True, exist_ok=True)
     with path.open("wb") as handle:
-        plistlib.dump(plist(binary), handle)
+        plistlib.dump(plist(binary, roots), handle)
 
     domain = f"gui/{os.getuid()}"
     # bootout first: launchd refuses a label already loaded, and this has to be

@@ -41,6 +41,7 @@ def _selector(
     uid_prefix: str | None,
     category: str | None,
     sender_filter=None,
+    missing: bool = False,
 ) -> tuple[str, dict]:
     clauses: list[str] = []
     params: dict[str, object] = {}
@@ -57,6 +58,10 @@ def _selector(
     if category:
         clauses.append("d.category = :category")
         params["category"] = category
+    if missing:
+        # Documents whose original has gone. Marked by a walk that read the
+        # folder, never by absence alone; this is the deliberate second step.
+        clauses.append("d.missing_since IS NOT NULL")
     if not clauses:
         raise ValueError("refusing to purge without a selector")
     return " AND ".join(clauses), params
@@ -69,9 +74,10 @@ def plan(
     uid_prefix: str | None = None,
     category: str | None = None,
     sender_filter=None,
+    missing: bool = False,
 ) -> PurgePlan:
     """What a purge would remove. Always run before doing it."""
-    where, params = _selector(source, uid_prefix, category, sender_filter)
+    where, params = _selector(source, uid_prefix, category, sender_filter, missing)
 
     ids = [
         row[0] for row in conn.execute(f"SELECT d.id FROM docs d WHERE {where}", params)
@@ -120,16 +126,17 @@ def purge(
     uid_prefix: str | None = None,
     category: str | None = None,
     sender_filter=None,
+    missing: bool = False,
 ) -> PurgePlan:
     """Delete matching documents. Chunks, vectors and FTS rows follow by cascade."""
     before = plan(
         conn, source=source, uid_prefix=uid_prefix, category=category,
-        sender_filter=sender_filter,
+        sender_filter=sender_filter, missing=missing,
     )
     if before.empty:
         return before
 
-    where, params = _selector(source, uid_prefix, category, sender_filter)
+    where, params = _selector(source, uid_prefix, category, sender_filter, missing)
     with transaction(conn):
         # Attachment rows first: extracted_doc_id has no ON DELETE behaviour, so
         # deleting a child document out from under it would leave a dangling

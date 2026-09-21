@@ -38,6 +38,9 @@ class Outcome:
     # between being announced and being asked for. Counted because a silent
     # drop at the connector is invisible in every other number here.
     unfetchable: int = 0
+    # Deleted or trashed in Gmail since the last sync. Hidden from search but
+    # kept on record; `muster purge --missing` is what actually removes them.
+    removed: int = 0
     fallback_reason: str | None = None
 
     def summary(self) -> str:
@@ -50,7 +53,7 @@ class Outcome:
             "incremental": "incremental",
             "fallback": f"full listing ({self.fallback_reason})",
         }[self.mode]
-        if not self.considered and not self.counts.created:
+        if not self.considered and not self.counts.created and not self.removed:
             return f"{where}: nothing new"
         parts = [f"{self.counts.created} indexed"]
         if self.counts.skipped:
@@ -63,6 +66,8 @@ class Outcome:
             parts.append(f"{self.counts.failed} failed")
         if self.unfetchable:
             parts.append(f"{self.unfetchable} gone from the mailbox")
+        if self.removed:
+            parts.append(f"{self.removed} deleted in Gmail")
         return f"{where}: {', '.join(parts)}, {self.counts.chunks} chunks"
 
 
@@ -92,14 +97,34 @@ def sync(
         return outcome
 
     try:
-        added, new_cursor = connector.history_since(cursor)
+        added, removed, new_cursor = connector.changes_since(cursor)
     except HistoryTooOld as exc:
         if not allow_fallback:
             raise
         log.info("history expired, falling back to a listing: %s", exc)
         return _full(conn, store, cfg, connector, exclude_categories, reason="history expired")
 
+    # A message added and then deleted inside one history window is gone. The
+    # deletion is the later fact, and fetching it would cost a request to store
+    # something we are about to hide.
+    if removed:
+        gone = set(removed)
+        added = [message_id for message_id in added if message_id not in gone]
+
     outcome = Outcome(mode="incremental", considered=len(added))
+
+    if removed:
+        from muster.missing import mark_missing
+
+        ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT id FROM docs WHERE source = ? AND source_uid IN (%s)"
+                % ",".join("?" * len(removed)),
+                (SOURCE, *removed),
+            )
+        ]
+        outcome.removed = mark_missing(conn, ids, reason="deleted in Gmail")
 
     if added:
         # Gmail reports a message as added for label changes too, so most of

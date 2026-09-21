@@ -140,6 +140,9 @@ class GmailConnector:
     def history_since(self, start_history_id: str) -> tuple[list[str], str | None]:
         """Message ids added since ``start_history_id``, and the new cursor.
 
+        Deprecated shape kept for callers that only want additions; see
+        :meth:`changes_since` for deletions too.
+
         This is the whole point of incremental sync: with nothing new it is a
         single request that returns a cursor and no history at all, rather than
         a listing of the mailbox.
@@ -149,7 +152,20 @@ class GmailConnector:
         """
         from googleapiclient.errors import HttpError
 
+        added, removed, newest = self.changes_since(start_history_id)
+        return added, newest
+
+    def changes_since(self, start_history_id: str) -> tuple[list[str], list[str], str | None]:
+        """Messages added and removed since ``start_history_id``.
+
+        Removal covers deleting and trashing: Gmail reports a message leaving
+        the mailbox either way, and from here they mean the same thing — the
+        message is not somewhere the account can reach.
+        """
+        from googleapiclient.errors import HttpError
+
         added: list[str] = []
+        removed: list[str] = []
         seen: set[str] = set()
         page_token = None
         newest = start_history_id
@@ -164,7 +180,7 @@ class GmailConnector:
                         startHistoryId=start_history_id,
                         # Deletions and label changes are not what this index
                         # tracks; asking for them only makes the response bigger.
-                        historyTypes=["messageAdded"],
+                        historyTypes=["messageAdded", "messageDeleted"],
                         pageToken=page_token,
                     )
                     .execute(),
@@ -184,10 +200,17 @@ class GmailConnector:
                     if message_id and message_id not in seen:
                         seen.add(message_id)
                         added.append(message_id)
+                for item in record.get("messagesDeleted", []):
+                    message_id = item.get("message", {}).get("id")
+                    if message_id:
+                        removed.append(message_id)
 
             page_token = response.get("nextPageToken")
             if not page_token:
-                return added, newest
+                # Reported as the provider reported them. Reconciling an add
+                # against a later delete is the sync's job, not the connector's:
+                # a connector yields what a source says and nothing more.
+                return added, removed, newest
 
     def fetch_ids(self, message_ids: Iterable[str], *, skip=None) -> Iterator[RawMessage]:
         """Fetch specific messages by id, for the incremental path.

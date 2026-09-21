@@ -34,8 +34,9 @@ class FakeGmail:
 
     source = "gmail"
 
-    def __init__(self, *, added=None, history_id="9000", expired=False, listing=None):
+    def __init__(self, *, added=None, removed=None, history_id="9000", expired=False, listing=None):
         self._added = added or []
+        self._removed = removed or []
         self._history_id = history_id
         self._expired = expired
         self._listing = listing or []
@@ -47,11 +48,15 @@ class FakeGmail:
         self.calls.append("getProfile")
         return self._history_id
 
-    def history_since(self, cursor):
+    def changes_since(self, cursor):
         self.calls.append(f"history.list({cursor})")
         if self._expired:
             raise HistoryTooOld("expired")
-        return list(self._added), self._history_id
+        return list(self._added), list(self._removed), self._history_id
+
+    def history_since(self, cursor):
+        added, _removed, newest = self.changes_since(cursor)
+        return added, newest
 
     def fetch_ids(self, ids, *, skip=None):
         ids = list(ids)
@@ -176,3 +181,38 @@ def test_unfetchable_messages_are_reported_not_swallowed(conn, cfg) -> None:
 
     assert outcome.unfetchable == 1
     assert "gone from the mailbox" in outcome.summary()
+
+
+def test_a_message_deleted_in_gmail_is_marked_missing(conn, cfg) -> None:
+    """Deleting mail should stop it being offered, without erasing the record."""
+    messages = _messages(2)
+    syncstate.set_cursor(conn, "gmail", "100")
+    incremental.sync(
+        conn, cfg,
+        FakeGmail(added=[m.source_uid for m in messages], history_id="120", listing=messages),
+    )
+
+    doomed = messages[0].source_uid
+    syncstate.set_cursor(conn, "gmail", "120")
+    outcome = incremental.sync(
+        conn, cfg, FakeGmail(added=[], removed=[doomed], history_id="130")
+    )
+
+    assert outcome.removed == 1
+    assert "deleted in Gmail" in outcome.summary()
+    row = conn.execute(
+        "SELECT missing_since FROM docs WHERE source_uid = ?", (doomed,)
+    ).fetchone()
+    assert row["missing_since"], "the document was not marked"
+    # Still on record: an archive should not lose its copy because a mailbox did.
+    assert conn.execute(
+        "SELECT count(*) FROM docs WHERE source_uid = ?", (doomed,)
+    ).fetchone()[0] == 1
+
+
+def test_a_message_added_then_deleted_is_not_fetched(conn, cfg) -> None:
+    """The deletion is the later fact; fetching it would cost a request for nothing."""
+    connector = FakeGmail(added=["m1"], removed=["m1"], history_id="140")
+    syncstate.set_cursor(conn, "gmail", "100")
+    incremental.sync(conn, cfg, connector)
+    assert connector.fetched == []

@@ -126,6 +126,9 @@ class WalkStats:
     # and it is indistinguishable from an empty folder unless it is reported.
     roots_denied: list[str] = field(default_factory=list)
     walk_errors: int = 0
+    # Roots that were listed successfully. Only documents under these may be
+    # judged absent: a denied or missing root proves nothing about its contents.
+    roots_read: list[str] = field(default_factory=list)
 
 
 def _iso(timestamp: float | None) -> str | None:
@@ -246,6 +249,8 @@ class FileConnector:
                 self.stats.roots_missing.append(str(base))
                 log.warning("cannot list %s: %s", base, exc)
                 continue
+
+            self.stats.roots_read.append(str(base))
 
             def note(error: OSError) -> None:
                 # os.walk swallows these by default, which would hide an entire
