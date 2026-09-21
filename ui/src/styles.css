@@ -474,3 +474,26 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
   border-radius: 8px;
   background: #fff;
 }
+
+/* Its own strip between the query and the results: a folder is an answer to a
+   different question and must not take a place in the list. */
+.folder-jump {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: calc(100% - 12px);
+  margin: 6px 6px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(127, 156, 255, 0.08);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.folder-jump:hover { background: rgba(127, 156, 255, 0.16); }
+.folder-jump .icon { color: var(--accent); }
+.folder-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-label { font-size: 11px; }

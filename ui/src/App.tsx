@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, api, type DocResponse, type Hit, type Mode, type SearchResponse } from "./api";
+import {
+  ApiError,
+  api,
+  type DocResponse,
+  type FolderHit,
+  type Hit,
+  type Mode,
+  type SearchResponse,
+} from "./api";
 import { mockSearchFor, mockStatus } from "./mock";
 import { Actions, type Action } from "./components/Actions";
 import { DocView, type View } from "./components/DocView";
 import { EmptyState } from "./components/EmptyState";
+import { FolderJump } from "./components/FolderJump";
 import { Footer } from "./components/Footer";
 import { ResultRow } from "./components/ResultRow";
 
@@ -76,6 +85,8 @@ export default function App() {
   const [stack, setStack] = useState<View[]>([]);
   // What the document view is showing, so the footer can name the keys for it.
   const [openDoc, setOpenDoc] = useState<DocResponse | null>(null);
+  /** A directory the query might have meant. Never mixed into the results. */
+  const [folder, setFolder] = useState<FolderHit | null>(null);
   const [syncing, setSyncing] = useState(false);
   // When the last refresh was asked for, so summoning the panel repeatedly does
   // not mean a request each time.
@@ -226,6 +237,22 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [query, mode, override]);
 
+  useEffect(() => {
+    const q = query.trim();
+    if (!q || USE_MOCK) {
+      setFolder(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      api
+        .folders(q)
+        .then((body) => setFolder(body.folders[0] ?? null))
+        // A missing suggestion is not worth an error: the results are the point.
+        .catch(() => setFolder(null));
+    }, DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [query]);
+
   // A new query invalidates a "show weak matches" override.
   useEffect(() => setOverride(null), [query, mode]);
 
@@ -256,6 +283,21 @@ export default function App() {
       setError(`Could not close the panel: ${cause}`);
     }
   }, []);
+
+  const openFolder = useCallback(async () => {
+    if (!folder) return;
+    if (USE_MOCK) {
+      console.info("open folder", folder.path);
+      return;
+    }
+    try {
+      const { openPath } = await import("@tauri-apps/plugin-opener");
+      await openPath(folder.path);
+      await hide();
+    } catch (cause) {
+      setError(`Could not open ${folder.display}: ${cause}`);
+    }
+  }, [folder, hide]);
 
   /** Read a document inside the panel. */
   const read = useCallback((hit: Hit | null) => {
@@ -447,6 +489,9 @@ export default function App() {
       // Enter reads it here. Leaving the panel to open Gmail or Preview is the
       // failure this view exists to remove; ⌘↵ still reveals the original.
       void (meta ? reveal(current) : read(current));
+    } else if (meta && event.shiftKey && event.key.toLowerCase() === "f") {
+      event.preventDefault();
+      void openFolder();
     } else if (meta && event.key.toLowerCase() === "o") {
       event.preventDefault();
       void open(current);
@@ -478,6 +523,8 @@ export default function App() {
           </span>
         )}
       </div>
+
+      {folder && !reading && <FolderJump folder={folder} onOpen={() => void openFolder()} />}
 
       <div className={`results${reading ? " reading" : ""}`} ref={resultsRef}>
         {reading ? (

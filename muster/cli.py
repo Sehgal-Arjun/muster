@@ -663,6 +663,21 @@ def sync_files(
         finally:
             conn.close()
 
+    folders_found = 0
+    if not roots:
+        from muster.connectors.files import DEFAULT_EXCLUDED_DIRS
+        from muster.folders import replace_all, scan
+
+        excluded = {d.lower() for d in (*DEFAULT_EXCLUDED_DIRS, *cfg.files.excluded_dirs)}
+        conn = db.connect(cfg.db_path)
+        try:
+            folders_found = replace_all(
+                conn,
+                scan(cfg.files.folder_roots, excluded, max_depth=cfg.files.folder_depth),
+            )
+        finally:
+            conn.close()
+
     typer.echo(
         f"\n{stats.seen} files seen"
         f"\n  {stats.excluded_type} skipped: not indexable"
@@ -685,6 +700,8 @@ def sync_files(
         )
     if restored:
         typer.echo(f"  {restored} came back and are searchable again")
+    if folders_found:
+        typer.echo(f"{folders_found} folders mapped for jump-to suggestions")
     if empty:
         typer.echo(f"  {empty} had no extractable text (indexed as metadata only)")
     if by_date_source:

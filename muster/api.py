@@ -363,6 +363,28 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "took_ms": round((time.perf_counter() - started) * 1000, 1),
         }
 
+    @app.get("/folders")
+    def folders(
+        q: str = Query(..., description="A name, not a sentence."),
+        limit: int = Query(3, ge=1, le=10),
+        _db: None = Depends(require_db),
+    ) -> dict:
+        """Directories a query might have meant.
+
+        Kept out of /search deliberately. A folder has no content, so ranking it
+        against documents would be inventing a score — and a suggestion that
+        pushes a real result off the list is worse than no suggestion.
+        """
+        from muster.folders import suggest
+
+        conn = _connection(cfg)
+        return {
+            "folders": [
+                {"path": f.path, "display": f.display, "name": f.name, "depth": f.depth}
+                for f in suggest(conn, q, limit=limit)
+            ]
+        }
+
     @app.get("/doc/{doc_id}")
     def doc(doc_id: int, _db: None = Depends(require_db)) -> dict:
         conn = _connection(cfg)

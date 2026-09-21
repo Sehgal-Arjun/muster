@@ -168,6 +168,15 @@ export interface MessageBody {
   images_removed: number;
 }
 
+/** A directory a query might have meant. Never mixed into results. */
+export interface FolderHit {
+  path: string;
+  /** Written the way a person would say it: ~/GitHub/muster. */
+  display: string;
+  name: string;
+  depth: number;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly code: string,
@@ -239,6 +248,7 @@ export const api = {
   }) => get<SearchResponse>("/search", params),
 
   doc: (id: number) => get<DocResponse>(`/doc/${id}`),
+  folders: (q: string) => get<{ folders: FolderHit[] }>("/folders", { q }),
   body: (id: number) => get<MessageBody>(`/doc/${id}/body`),
 
   /** Start an incremental sync. Returns at once; poll syncJob for the outcome. */

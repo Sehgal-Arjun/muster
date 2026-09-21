@@ -52,6 +52,12 @@ class FilesConfig:
 
     roots: tuple[str, ...] = ("~/Documents", "~/Downloads")
     max_bytes: int = 100 * 1024 * 1024
+    # Where to look for *directories* to offer as jump targets. Wider than the
+    # roots above on purpose: the folder you want to open is often one nothing
+    # inside is indexed from — a code checkout, say — and recording a name
+    # costs nothing next to reading a file.
+    folder_roots: tuple[str, ...] = ("~",)
+    folder_depth: int = 5
     # Added to the connector's built-in list rather than replacing it: the
     # defaults cover what is junk on every Mac, and this covers what is junk on
     # this one. Matched by directory name at any depth.
@@ -232,6 +238,8 @@ def load_config(home: Path | None = None) -> Config:
             roots=tuple(str(r) for r in files.get("roots", FilesConfig.roots)),
             max_bytes=int(files.get("max_bytes", FilesConfig.max_bytes)),
             excluded_dirs=tuple(str(d) for d in files.get("excluded_dirs", ())),
+            folder_roots=tuple(str(r) for r in files.get("folder_roots", FilesConfig.folder_roots)),
+            folder_depth=int(files.get("folder_depth", FilesConfig.folder_depth)),
         ),
         search=SearchConfig(
             title_weight=float(search.get("title_weight", 1.0)),
