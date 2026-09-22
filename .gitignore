@@ -29,6 +29,7 @@ dist/
 eval/queries.jsonl
 eval/queries.local.jsonl
 eval/results/
+state-of-the-app.md
 token.json
 ui/dist/
 ui/node_modules/
