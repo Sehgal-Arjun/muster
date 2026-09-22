@@ -42,7 +42,7 @@ mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.muster"
 sed -e "s|__MUSTER_BIN__|$MUSTER_BIN|g" \
     -e "s|__HOME__|$HOME|g" \
     -e "s|__REPO__|$REPO|g" \
-    "$REPO/packaging/$LABEL.plist" > "$AGENT"
+    "$REPO/packaging/muster.serve.plist" > "$AGENT"
 
 # bootout before bootstrap: launchctl refuses to load a label already present,
 # and this script has to be safe to re-run after every rebuild.

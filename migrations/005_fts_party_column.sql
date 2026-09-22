@@ -1,10 +1,10 @@
 -- 005: make the people on a message searchable.
 --
--- "Mira Halvorsen" and "Tomas Lindqvist" found nothing. Both names appear in the
--- archive exactly once each, in the From display name — "Mira Halvorsen
--- <m.halvorsen@university.example>" — and nowhere in any subject or body. The address
--- alone would not have helped: unicode61 reads mhalvorsen and tlindqvist as
--- single tokens, so neither matches the two-word query a person actually types.
+-- Searching for a correspondent by name found nothing. Some names appear in an
+-- archive exactly once, in the From display name — "Mira Halvorsen
+-- <m.halvorsen@university.example>" — and nowhere in any subject or body. The
+-- address alone would not have helped: unicode61 reads m.halvorsen as a single
+-- token, so it never matches the two-word query a person actually types.
 --
 -- So the display name is what has to be indexed, alongside the addresses for
 -- the cases where the useful token is a domain rather than a name.
