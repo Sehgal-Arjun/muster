@@ -18,6 +18,11 @@ use tauri_nspanel::{
 };
 
 pub const PANEL: &str = "spotlight";
+/// The launchd job that runs the read-only API the panel talks to. Kept in step
+/// with packaging/install.sh by hand; there is only one of each.
+#[cfg(target_os = "macos")]
+const SERVE_LABEL: &str = "dev.muster.desktop.serve";
+
 /// Emitted on every summon so the frontend can take focus. See `toggle`.
 pub const SHOWN_EVENT: &str = "muster://shown";
 
@@ -42,6 +47,47 @@ tauri_panel! {
     panel_event!(SpotlightEvents {
         window_did_resign_key(notification: &NSNotification) -> ()
     })
+}
+
+/// Ask launchd to start the API server, for when the panel finds it absent.
+///
+/// The panel cannot do its job without it, and "run `muster serve`" is a poor
+/// answer to give someone who has just pressed a hotkey. launchd already owns
+/// the process — this only tells it to get on with it, so the server stays a
+/// separate thing that the panel merely talks to rather than something bundled
+/// inside the app.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn start_server() -> Result<String, String> {
+    // The uid from the home directory's owner, rather than a dependency for one
+    // number: launchd domains are per user and this is the user's own home.
+    use std::os::unix::fs::MetadataExt;
+
+    let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
+    let uid = std::fs::metadata(&home)
+        .map_err(|e| format!("cannot stat {home}: {e}"))?
+        .uid();
+    let domain = format!("gui/{uid}/{SERVE_LABEL}");
+    let output = std::process::Command::new("launchctl")
+        .args(["kickstart", "-k", &domain])
+        .output()
+        .map_err(|e| format!("could not run launchctl: {e}"))?;
+
+    if output.status.success() {
+        return Ok("starting".into());
+    }
+    // Not loaded at all: the installer has never run, or ran under an older
+    // label. Saying so is more use than "failed".
+    Err(format!(
+        "launchd has no job {SERVE_LABEL} — run packaging/install.sh ({})",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn start_server() -> Result<String, String> {
+    Err("only macOS runs the server under launchd".into())
 }
 
 #[tauri::command]
@@ -146,7 +192,7 @@ pub fn run() {
     }
 
     builder
-        .invoke_handler(tauri::generate_handler![hide_panel])
+        .invoke_handler(tauri::generate_handler![hide_panel, start_server])
         .setup(|app| {
             // No Dock icon and no menu bar: this is summoned, not launched.
             #[cfg(target_os = "macos")]

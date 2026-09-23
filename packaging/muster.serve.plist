@@ -24,12 +24,13 @@
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- Restart if it dies. It is the only thing the panel can talk to. -->
+    <!-- Unconditionally. It is the only thing the panel can talk to, and a
+         panel open against a dead server is the one state this must not reach.
+         SuccessfulExit=false was not enough: it restarts after a crash but not
+         after a clean exit, so anything that stopped the server politely left
+         it stopped for good. -->
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
 
     <!-- Do not hammer the CPU if it is crash-looping on a broken database. -->
     <key>ThrottleInterval</key>

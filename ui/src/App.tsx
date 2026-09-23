@@ -34,6 +34,8 @@ const DEBOUNCE_MS = 120;
  * a minute costs one request.
  */
 const REFRESH_EVERY_MS = 2 * 60 * 1000;
+/** How long to give launchd to bring the server up before trying again. */
+const SERVER_START_MS = 1200;
 
 /**
  * The last search, kept across restarts of the app itself.
@@ -75,6 +77,9 @@ export default function App() {
    * empty list — which reads as "nothing found" rather than "not ready yet".
    */
   const [modelReady, setModelReady] = useState(true);
+  // Guards against asking launchd to start the server on every keystroke while
+  // it is already starting.
+  const startingServer = useRef(false);
   /**
    * What is showing instead of the results, innermost last.
    *
@@ -124,6 +129,33 @@ export default function App() {
       // The server being down is already visible on the next search; a failed
       // background refresh should not put an error over the results.
       setSyncing(false);
+    }
+  }, []);
+
+  /**
+   * Bring the server back rather than telling the reader to.
+   *
+   * "No server at 127.0.0.1:8765. Run `muster serve`." is a poor answer to
+   * someone who has just pressed a hotkey. launchd owns the process, so this
+   * only asks it to get on with it — the server stays a separate thing the
+   * panel talks to, never something bundled into the app.
+   *
+   * Returns true if it is worth retrying the request.
+   */
+  const reviveServer = useCallback(async (): Promise<boolean> => {
+    if (USE_MOCK || startingServer.current) return false;
+    startingServer.current = true;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("start_server");
+      await new Promise((done) => setTimeout(done, SERVER_START_MS));
+      return true;
+    } catch {
+      // launchd has no such job: the installer has never run. The ordinary
+      // error message is the right one, so let it stand.
+      return false;
+    } finally {
+      startingServer.current = false;
     }
   }, []);
 
@@ -179,6 +211,9 @@ export default function App() {
       // Carrying that across summons is the bug, not the feature.
       setMode("hybrid");
       void refresh();
+      // Checked on the way in, so the first keystroke does not have to pay for
+      // discovering the server is absent.
+      void api.status().catch(() => reviveServer());
     };
     // Only focus, not clear: regaining focus by clicking the panel back to the
     // front should not throw away what is already typed in it.
@@ -192,7 +227,7 @@ export default function App() {
       window.removeEventListener("focus", focus);
       void unlisten.then((stop) => stop());
     };
-  }, [refresh]);
+  }, [refresh, reviveServer]);
 
   useEffect(() => {
     if (USE_MOCK) {
@@ -228,6 +263,23 @@ export default function App() {
         setSelected(0);
       } catch (cause) {
         if (ticket !== latest.current) return;
+        // The server being down is recoverable: start it and ask once more
+        // before reporting anything.
+        if (cause instanceof ApiError && cause.code === "unreachable") {
+          if (await reviveServer()) {
+            try {
+              const body = await api.search({ q, mode, ...(override ?? {}) });
+              if (ticket !== latest.current) return;
+              setResponse(body);
+              setError(null);
+              setSelected(0);
+              return;
+            } catch (second) {
+              setError(second instanceof ApiError ? second.message : String(second));
+              return;
+            }
+          }
+        }
         setResponse(null);
         setError(cause instanceof ApiError ? cause.message : String(cause));
       } finally {
@@ -235,7 +287,7 @@ export default function App() {
       }
     }, DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [query, mode, override]);
+  }, [query, mode, override, reviveServer]);
 
   useEffect(() => {
     const q = query.trim();
