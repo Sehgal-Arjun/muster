@@ -78,7 +78,7 @@ def test_depth_is_bounded(conn, tmp_path) -> None:
     deep.mkdir(parents=True)
     found = scan((str(tmp_path),), set(), max_depth=3)
     assert found, "nothing scanned at all"
-    assert max(f.depth for f in found) <= 3
+    assert max(s.folder.depth for s in found) <= 3
 
 
 def test_a_rescan_forgets_folders_that_are_gone(conn, tmp_path) -> None:
@@ -89,3 +89,59 @@ def test_a_rescan_forgets_folders_that_are_gone(conn, tmp_path) -> None:
     (tmp_path / "temporary").rmdir()
     replace_all(conn, scan((str(tmp_path),), set()))
     assert suggest(conn, "temporary") == []
+
+
+# --- matching the way people actually type --------------------------------
+
+
+@pytest.fixture
+def course_tree(conn, tmp_path):
+    """The shape that broke every assumption the first version made."""
+    (tmp_path / "Waterloo" / "3A" / "MATH213" / "Sample Exams").mkdir(parents=True)
+    (tmp_path / "Waterloo" / "3A" / "SE350" / "past exams").mkdir(parents=True)
+    replace_all(conn, scan((str(tmp_path),), set()))
+    return conn
+
+
+def test_a_run_together_name_is_found_as_separate_words(course_tree) -> None:
+    """MATH213 is one word on disk and two as typed."""
+    assert any(h.name == "MATH213" for h in suggest(course_tree, "math 213"))
+    assert any(h.name == "MATH213" for h in suggest(course_tree, "math213"))
+
+
+def test_a_folder_is_reachable_by_naming_what_it_sits_under(course_tree) -> None:
+    """"Sample Exams" is remembered as the course far more often than as itself."""
+    hits = suggest(course_tree, "math 213 sample exam")
+    assert hits and hits[0].name == "Sample Exams", [h.display for h in hits]
+
+
+def test_word_order_does_not_matter(course_tree) -> None:
+    """The words are the memory; the order is not."""
+    assert any(h.name == "Sample Exams" for h in suggest(course_tree, "exams math"))
+    assert any(h.name == "past exams" for h in suggest(course_tree, "se350 exams past"))
+
+
+def test_half_typed_words_still_match(course_tree) -> None:
+    assert any(h.name == "Sample Exams" for h in suggest(course_tree, "sampl exam"))
+
+
+def test_every_word_must_appear(course_tree) -> None:
+    """AND, not OR: matching any one word would offer whatever shares a term."""
+    assert suggest(course_tree, "math 213 chemistry") == []
+
+
+def test_a_sentence_is_still_a_question_about_content(course_tree) -> None:
+    assert suggest(course_tree, "what did the exam say about linear algebra proofs") == []
+
+
+def test_the_folders_own_name_outranks_its_ancestors(course_tree) -> None:
+    hits = suggest(course_tree, "past exams")
+    assert hits[0].name == "past exams"
+
+
+def test_word_splitting_covers_the_forms_people_type() -> None:
+    from muster.folders import words_of
+
+    assert words_of("MATH213") == ["MATH213", "MATH", "213"]
+    assert words_of("past-exam-collection") == ["past", "exam", "collection"]
+    assert [w.lower() for w in words_of("SampleExams")] == ["sampleexams", "sample", "exams"]
