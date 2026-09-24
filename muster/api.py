@@ -381,7 +381,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         return {
             "folders": [
                 {"path": f.path, "display": f.display, "name": f.name, "depth": f.depth}
-                for f in suggest(conn, q, limit=limit)
+                for f in suggest(conn, q, limit=limit, model_id=cfg.embed.model_id)
             ]
         }
 

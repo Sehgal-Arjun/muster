@@ -221,6 +221,32 @@ def _run_file_pass() -> int:
     return created
 
 
+def _embed_folders(conn, cfg) -> int:
+    """Give folder names vectors, so "sample test" can find "Sample Exams".
+
+    Done here rather than during the walk because this is where the model is
+    already loaded. Names are short and deduplicated by text, so a rebuilt map
+    re-embeds only what actually changed — usually nothing.
+    """
+    from muster.embed import encode_documents, load_model, pack
+    from muster.folders import pending_vectors, store_vectors
+
+    pending = pending_vectors(conn, cfg.embed.model_id)
+    if not pending:
+        return 0
+    model = load_model(cfg.embed.model_id, cfg.embed.device)
+    vectors = encode_documents(
+        model, [text for _h, text in pending],
+        batch_size=cfg.embed.batch_size, model_id=cfg.embed.model_id,
+    )
+    written = store_vectors(
+        conn, cfg.embed.model_id,
+        [(h, pack(v)) for (h, _t), v in zip(pending, vectors, strict=True)],
+    )
+    typer.echo(f"embedded {written} folder name(s)")
+    return written
+
+
 def _embed_pending(cfg, limit: int | None = None) -> None:
     """Embed whatever is waiting.
 
@@ -245,6 +271,7 @@ def _embed_pending(cfg, limit: int | None = None) -> None:
             typer.echo(f"paused after {report.chunks} chunks; the rest is still waiting")
         else:
             typer.echo(f"embedded {report.chunks} chunks")
+        _embed_folders(conn, cfg)
     finally:
         conn.close()
 

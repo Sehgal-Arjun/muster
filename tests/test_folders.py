@@ -145,3 +145,53 @@ def test_word_splitting_covers_the_forms_people_type() -> None:
     assert words_of("MATH213") == ["MATH213", "MATH", "213"]
     assert words_of("past-exam-collection") == ["past", "exam", "collection"]
     assert [w.lower() for w in words_of("SampleExams")] == ["sampleexams", "sample", "exams"]
+
+
+# --- meaning ---------------------------------------------------------------
+
+
+def test_the_meaning_arm_is_optional(course_tree) -> None:
+    """No model, no vectors, no problem: the word arm stands alone."""
+    hits = suggest(course_tree, "math 213 sample exam", model_id="no-such-model")
+    assert hits and hits[0].name == "Sample Exams"
+
+
+def test_folder_texts_are_only_embedded_once(conn, tmp_path) -> None:
+    """Rebuilt maps must not re-embed a thousand unchanged names every walk."""
+    from muster.folders import pending_vectors, store_vectors
+
+    (tmp_path / "Waterloo" / "MATH213" / "Sample Exams").mkdir(parents=True)
+    scanned = scan((str(tmp_path),), set())
+    replace_all(conn, scanned)
+
+    first = pending_vectors(conn, "test-model")
+    assert first, "nothing was pending on a fresh map"
+    store_vectors(conn, "test-model", [(h, b"\x00" * 8) for h, _t in first])
+    assert pending_vectors(conn, "test-model") == []
+
+    # A rebuild of the same tree changes no text, so nothing needs embedding.
+    replace_all(conn, scan((str(tmp_path),), set()))
+    assert pending_vectors(conn, "test-model") == []
+
+
+def test_a_changed_folder_name_needs_a_new_vector(conn, tmp_path) -> None:
+    from muster.folders import pending_vectors, store_vectors
+
+    (tmp_path / "Exams").mkdir()
+    replace_all(conn, scan((str(tmp_path),), set()))
+    store_vectors(
+        conn, "test-model",
+        [(h, b"\x00" * 8) for h, _t in pending_vectors(conn, "test-model")],
+    )
+
+    (tmp_path / "Exams").rename(tmp_path / "Tests")
+    replace_all(conn, scan((str(tmp_path),), set()))
+    assert pending_vectors(conn, "test-model"), "a renamed folder kept its old vector"
+
+
+def test_the_meaning_text_reads_as_a_path(conn, tmp_path) -> None:
+    (tmp_path / "Waterloo" / "MATH213" / "Sample Exams").mkdir(parents=True)
+    scanned = scan((str(tmp_path),), set())
+    deepest = max(scanned, key=lambda s: s.folder.depth)
+    assert deepest.meaning_text.endswith("Sample Exams")
+    assert " / " in deepest.meaning_text

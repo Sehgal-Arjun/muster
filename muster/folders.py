@@ -83,6 +83,16 @@ class Scanned:
     name_text: str
     path_text: str
 
+    @property
+    def meaning_text(self) -> str:
+        """The folder written as a phrase, for embedding.
+
+        Segments joined the way a path reads, because a model does better with
+        "Waterloo / 3A / MATH213 / Sample Exams" than with a bag of tokens.
+        """
+        parts = [p for p in (self.path_text, self.name_text) if p]
+        return " / ".join(parts)
+
 
 def scan(
     roots: tuple[str, ...],
@@ -146,11 +156,11 @@ def replace_all(conn, scanned: list[Scanned]) -> int:
         conn.execute("DELETE FROM folders_fts")
         conn.execute("DELETE FROM folders")
         conn.executemany(
-            "INSERT INTO folders (path, name, name_text, path_text, depth, mtime, seen_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO folders (path, name, name_text, path_text, depth, mtime,"
+            " seen_at, meaning_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (s.folder.path, s.folder.name, s.name_text, s.path_text,
-                 s.folder.depth, s.folder.mtime, now)
+                 s.folder.depth, s.folder.mtime, now, text_hash(s.meaning_text))
                 for s in scanned
             ],
         )
@@ -162,6 +172,44 @@ def replace_all(conn, scanned: list[Scanned]) -> int:
     return len(scanned)
 
 
+def text_hash(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def pending_vectors(conn, model_id: str) -> list[tuple[str, str]]:
+    """(hash, text) for folder names with no vector yet, deduplicated."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT f.meaning_hash, f.path_text, f.name_text
+        FROM folders f
+        WHERE f.meaning_hash IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM folder_vectors v
+              WHERE v.text_hash = f.meaning_hash AND v.model_id = ?
+          )
+        """,
+        (model_id,),
+    ).fetchall()
+    return [
+        (h, " / ".join(p for p in (path_text, name_text) if p))
+        for h, path_text, name_text in rows
+    ]
+
+
+def store_vectors(conn, model_id: str, rows: list[tuple[str, bytes]]) -> int:
+    if not rows:
+        return 0
+    with conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO folder_vectors (text_hash, model_id, embedding)"
+            " VALUES (?, ?, ?)",
+            [(h, model_id, blob) for h, blob in rows],
+        )
+    return len(rows)
+
+
 def _match_query(words: list[str]) -> str:
     """Every word must appear, each allowed to be half-typed.
 
@@ -171,7 +219,95 @@ def _match_query(words: list[str]) -> str:
     return " AND ".join(f'"{word}"*' for word in words)
 
 
-def suggest(conn, query: str, limit: int = 3) -> list[Folder]:
+# The k in 1/(k + rank), matching the document ranker. Not tuned here either.
+RRF_K = 60
+
+
+def _word_arm(conn, words: list[str], depth: int) -> list[tuple[int, Folder]]:
+    """Folders whose path contains every word typed."""
+    needle = " ".join(words).lower()
+    try:
+        rows = conn.execute(
+            """
+            SELECT f.id, f.path, f.name, f.depth, f.mtime
+            FROM folders_fts
+            JOIN folders f ON f.id = folders_fts.rowid
+            WHERE folders_fts MATCH :match
+            ORDER BY
+                CASE
+                    WHEN lower(f.name) = :needle THEN 0
+                    WHEN lower(f.name) LIKE :prefix THEN 1
+                    ELSE 2
+                END,
+                bm25(folders_fts, 8.0, 1.0),
+                f.depth ASC,
+                f.mtime DESC
+            LIMIT :limit
+            """,
+            {
+                "match": _match_query(words),
+                "needle": needle,
+                "prefix": f"{needle}%",
+                "limit": depth,
+            },
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — a malformed query is not an error
+        log.debug("folder word match failed for %r: %s", words, exc)
+        return []
+    return [(r[0], Folder(path=r[1], name=r[2], depth=r[3], mtime=r[4])) for r in rows]
+
+
+def _meaning_arm(conn, query: str, model_id: str, depth: int) -> list[tuple[int, Folder]]:
+    """Folders that mean something close to the query.
+
+    This is what knows a "Sample Test" is a "Sample Exams". Word matching sees
+    two different strings; a reader sees one folder.
+    """
+    from muster.db import load_sqlite_vec
+    from muster.embed import encode_query, load_model, pack
+
+    try:
+        load_sqlite_vec(conn)
+        if not conn.execute(
+            "SELECT 1 FROM folder_vectors WHERE model_id = ? LIMIT 1", (model_id,)
+        ).fetchone():
+            return []  # nothing embedded yet; the word arm stands alone
+        embedding = pack(encode_query(load_model(model_id), query, model_id))
+        rows = conn.execute(
+            """
+            SELECT f.id, f.path, f.name, f.depth, f.mtime
+            FROM folders f
+            JOIN folder_vectors v
+              ON v.text_hash = f.meaning_hash AND v.model_id = :model
+            ORDER BY vec_distance_cosine(v.embedding, :embedding) ASC
+            LIMIT :limit
+            """,
+            {"model": model_id, "embedding": embedding, "limit": depth},
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — no model, no vec, no vectors
+        log.debug("folder meaning match unavailable: %s", exc)
+        return []
+    return [(r[0], Folder(path=r[1], name=r[2], depth=r[3], mtime=r[4])) for r in rows]
+
+
+def _fuse(arms: list[list[tuple[int, Folder]]], limit: int) -> list[Folder]:
+    """Reciprocal rank fusion, as the document ranker does it.
+
+    Positions only. A BM25 score and a cosine distance are not on comparable
+    scales, and weighting them directly would need a constant nobody can
+    justify.
+    """
+    scores: dict[int, float] = {}
+    seen: dict[int, Folder] = {}
+    for arm in arms:
+        for rank, (folder_id, folder) in enumerate(arm, start=1):
+            scores[folder_id] = scores.get(folder_id, 0.0) + 1.0 / (RRF_K + rank)
+            seen.setdefault(folder_id, folder)
+    ordered = sorted(scores, key=lambda i: (-scores[i], seen[i].depth))
+    return [seen[i] for i in ordered[:limit]]
+
+
+def suggest(conn, query: str, limit: int = 3, model_id: str | None = None) -> list[Folder]:
     """Directories a query might have meant, best first.
 
     Only for queries that look like a name. A sentence is a question about
@@ -182,38 +318,12 @@ def suggest(conn, query: str, limit: int = 3) -> list[Folder]:
     if not words or len(words) > MAX_QUERY_WORDS:
         return []
 
-    needle = " ".join(words).lower()
-    try:
-        rows = conn.execute(
-            """
-            SELECT f.path, f.name, f.depth, f.mtime
-            FROM folders_fts
-            JOIN folders f ON f.id = folders_fts.rowid
-            WHERE folders_fts MATCH :match
-            ORDER BY
-                -- An exact or leading match on the folder's own name is what
-                -- somebody typing a name meant; everything else is inference.
-                CASE
-                    WHEN lower(f.name) = :needle THEN 0
-                    WHEN lower(f.name) LIKE :prefix THEN 1
-                    ELSE 2
-                END,
-                -- Then BM25, with the name weighted well above the ancestors it
-                -- happens to sit under.
-                bm25(folders_fts, 8.0, 1.0),
-                f.depth ASC,
-                f.mtime DESC
-            LIMIT :limit
-            """,
-            {
-                "match": _match_query(words),
-                "needle": needle,
-                "prefix": f"{needle}%",
-                "limit": limit,
-            },
-        ).fetchall()
-    except Exception as exc:  # noqa: BLE001 — a malformed query is not an error
-        log.debug("folder suggestion failed for %r: %s", query, exc)
-        return []
-
-    return [Folder(path=r[0], name=r[1], depth=r[2], mtime=r[3]) for r in rows]
+    # Deeper than the limit so fusion has something to work with: a folder the
+    # word arm ranks fourth can still win once the meaning arm agrees.
+    depth = max(limit * 4, 12)
+    arms = [_word_arm(conn, words, depth)]
+    if model_id:
+        meaning = _meaning_arm(conn, query, model_id, depth)
+        if meaning:
+            arms.append(meaning)
+    return _fuse(arms, limit)
