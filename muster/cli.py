@@ -275,6 +275,154 @@ def _embed_pending(cfg, limit: int | None = None) -> None:
     finally:
         conn.close()
 
+process_app = typer.Typer(
+    name="process", help="Processes: the thing a pile of documents is about.",
+    no_args_is_help=True,
+)
+app.add_typer(process_app)
+
+
+def _open_db():
+    cfg = load_config()
+    _require_db(cfg)
+    return cfg, db.connect(cfg.db_path, load_vec=True)
+
+
+@process_app.command("new")
+def process_new(
+    name: Annotated[str, typer.Argument(help="What the process is called.")],
+    accept_all: Annotated[
+        bool,
+        typer.Option("--accept-all", help="Take every proposal without asking."),
+    ] = False,
+    top: Annotated[
+        int, typer.Option("--top", help="Accept the N best proposals without asking.")
+    ] = 0,
+) -> None:
+    """Create a process and propose anchors for it."""
+    from muster import processes
+
+    cfg, conn = _open_db()
+    try:
+        slug = processes.slugify(name)
+        if processes.get(conn, slug):
+            typer.echo(f"a process named {slug!r} already exists", err=True)
+            raise typer.Exit(1)
+
+        proposals = processes.propose(conn, name, own_addresses=cfg.own_addresses)
+        if not proposals:
+            typer.echo("no recurring identifiers found; creating with no anchors")
+
+        process = processes.create(conn, name, slug)
+        typer.echo(f"created {process.slug}")
+
+        accepted = 0
+        for index, proposal in enumerate(proposals):
+            take = accept_all or (top and index < top)
+            if not take and top == 0 and not accept_all:
+                take = typer.confirm(f"  {proposal.line()}\n  anchor on this?", default=False)
+            if take:
+                if processes.add_anchor(conn, process.id, proposal.kind, proposal.value):
+                    accepted += 1
+                    typer.echo(f"  + {proposal.kind} {proposal.value}")
+
+        typer.echo(f"\n{accepted} anchor(s) of {len(proposals)} proposed")
+        if accepted == 0:
+            typer.echo("  anchors are sufficient, not necessary — gather still works"
+                       " from the seed search alone, just less completely")
+    finally:
+        conn.close()
+
+
+@process_app.command("list")
+def process_list() -> None:
+    """Every process, with how many anchors each has."""
+    from muster import processes
+
+    _cfg, conn = _open_db()
+    try:
+        found = processes.all_processes(conn)
+        if not found:
+            typer.echo("no processes yet — muster process new \"...\"")
+            return
+        for process in found:
+            kinds = {}
+            for anchor in process.anchors:
+                kinds[anchor.kind] = kinds.get(anchor.kind, 0) + 1
+            summary = ", ".join(f"{n} {k}" for k, n in sorted(kinds.items())) or "no anchors"
+            typer.echo(f"  {process.slug:34} {process.name[:32]:34} {summary}")
+    finally:
+        conn.close()
+
+
+@process_app.command("show")
+def process_show(slug: Annotated[str, typer.Argument(help="Process slug.")]) -> None:
+    """One process and its anchors."""
+    from muster import processes
+
+    _cfg, conn = _open_db()
+    try:
+        process = processes.get(conn, slug)
+        if process is None:
+            typer.echo(f"no process {slug!r}", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"{process.name}  ({process.slug})")
+        typer.echo(f"  created {process.created_at}   updated {process.updated_at}")
+        if not process.anchors:
+            typer.echo("  no anchors")
+        for anchor in process.anchors:
+            typer.echo(f"  {anchor.kind:12} {anchor.value}")
+    finally:
+        conn.close()
+
+
+@process_app.command("anchor")
+def process_anchor(
+    action: Annotated[str, typer.Argument(help="add or rm")],
+    slug: Annotated[str, typer.Argument(help="Process slug.")],
+    kind: Annotated[str, typer.Argument(help="domain|address|thread_uid|ref_pattern|folder|doc_id")],
+    value: Annotated[str, typer.Argument(help="The identifier.")],
+) -> None:
+    """Add or remove one anchor."""
+    from muster import processes
+
+    _cfg, conn = _open_db()
+    try:
+        process = processes.get(conn, slug)
+        if process is None:
+            typer.echo(f"no process {slug!r}", err=True)
+            raise typer.Exit(1)
+        if action == "add":
+            new = processes.add_anchor(conn, process.id, kind, value)
+            typer.echo("added" if new else "already anchored")
+        elif action == "rm":
+            gone = processes.remove_anchor(conn, process.id, kind, value)
+            typer.echo("removed" if gone else "no such anchor")
+        else:
+            typer.echo("action must be add or rm", err=True)
+            raise typer.Exit(1)
+    finally:
+        conn.close()
+
+
+@process_app.command("suggest")
+def process_suggest() -> None:
+    """Correspondents carrying real traffic that no process claims. Proposals only."""
+    from muster import processes
+
+    _cfg, conn = _open_db()
+    try:
+        found = processes.unclaimed_clusters(conn)
+        if not found:
+            typer.echo("nothing unclaimed worth suggesting")
+            return
+        typer.echo("no process claims these; muster process new \"...\" then anchor on them:")
+        for proposal in found:
+            typer.echo(f"  {proposal.line()}")
+    finally:
+        conn.close()
+
+
 corpus_app = typer.Typer(
     name="corpus", help="Freeze and inspect eval corpora.", no_args_is_help=True
 )

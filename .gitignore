@@ -29,6 +29,7 @@ dist/
 eval/queries.jsonl
 eval/queries.local.jsonl
 eval/results/
+GATHER_DECISIONS.md
 state-of-the-app.md
 token.json
 ui/dist/
