@@ -405,6 +405,53 @@ def process_anchor(
         conn.close()
 
 
+@process_app.command("extract")
+def process_extract(
+    slug: Annotated[str, typer.Argument(help="Process slug.")],
+    model: Annotated[str | None, typer.Option("--model", help="Ollama model id.")] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Stop after N documents.")] = 0,
+) -> None:
+    """Extract structured facts from each document in a process. Resumable."""
+    from muster import extraction, gather as gather_mod, processes
+    from muster.pausing import is_paused
+
+    cfg, conn = _open_db()
+    try:
+        process = processes.get(conn, slug)
+        if process is None:
+            typer.echo(f"no process {slug!r}", err=True)
+            raise typer.Exit(1)
+
+        result = gather_mod.gather(conn, process)
+        doc_ids = result.doc_ids[: limit or None]
+        todo = extraction.pending(conn, doc_ids)
+        typer.echo(
+            f"{result.size} documents gathered; {len(doc_ids) - len(todo)} already"
+            f" extracted, {len(todo)} to do"
+        )
+        if not todo:
+            return
+
+        owner = ", ".join(sorted(processes.own_addresses_from_archive(conn))) or "the recipient"
+
+        def report(done: int, total: int, doc_id: int) -> None:
+            typer.echo(f"\r  {done}/{total}  doc {doc_id}   ", nl=False)
+
+        extracted, failed = extraction.extract_set(
+            conn, doc_ids, model=model or extraction.DEFAULT_MODEL,
+            owner=owner, progress=report,
+            should_stop=lambda: is_paused(cfg.home),
+        )
+        typer.echo(f"\n{extracted} extracted, {failed} failed")
+        if failed:
+            typer.echo(
+                f"  {failed} document(s) could not be read and are recorded as"
+                " unaccounted for rather than dropped"
+            )
+    finally:
+        conn.close()
+
+
 @process_app.command("suggest")
 def process_suggest() -> None:
     """Correspondents carrying real traffic that no process claims. Proposals only."""
