@@ -253,3 +253,127 @@ def test_a_satisfaction_verdict_is_cached(conn) -> None:
     for _ in range(3):
         OI.satisfies(conn, "proof of insurance", "insurance.pdf", model="m", ask=ask)
     assert len(calls) == 1, "the model was asked the same pair twice"
+
+
+# --- dismissal -------------------------------------------------------------
+
+
+def _dismissable(conn, process):
+    asked = _mail(conn, uid="ask", title="Please complete the portal declaration",
+                  when="2026-04-01T09:00:00+00:00", sender=THEM)
+    _extract(conn, asked, direction="inbound",
+             requests_of_me=[{"what": "the portal declaration", "due": None}])
+    return asked
+
+
+def test_a_dismissed_item_leaves_the_open_list(conn, process) -> None:
+    _dismissable(conn, process)
+    before = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        process_id=process.id)
+    assert len(before.items) == 1
+
+    OI.dismiss(conn, process.id, "the portal declaration", known_docs=before.documents_considered)
+    after = OI.compute(conn, G.gather(conn, process), model="test-model",
+                       today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                       process_id=process.id)
+    assert after.items == []
+    assert len(after.settled_items) == 1
+    assert after.settled_items[0].settled == "done"
+
+
+def test_a_dismissal_is_evidence_not_a_delete(conn, process) -> None:
+    """An absence would simply be re-derived as open on the next run."""
+    _dismissable(conn, process)
+    OI.dismiss(conn, process.id, "the portal declaration")
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        process_id=process.id)
+    settled = report.settled_items[0]
+    assert settled.settled_at, "no date was recorded"
+    assert settled.what == "the portal declaration"
+    assert settled.doc_ids, "history was lost"
+
+
+def test_settling_one_wording_settles_the_restatement(conn, process) -> None:
+    """A checklist repeated in a reminder is one obligation."""
+    for i, when in enumerate(("2026-04-01T09:00:00+00:00", "2026-04-08T09:00:00+00:00")):
+        doc = _mail(conn, uid=f"ask{i}", title="Reminder", when=when, sender=THEM)
+        _extract(conn, doc, direction="inbound",
+                 requests_of_me=[{"what": "a copy of your passport", "due": None}])
+    OI.dismiss(conn, process.id, "copy of the passport")   # different wording
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        process_id=process.id)
+    assert report.items == []
+
+
+def test_new_documents_mark_a_dismissal_as_contradicted(conn, process) -> None:
+    """The dismissal was a judgement about what was known then, so it is
+    surfaced rather than silently kept or silently dropped."""
+    _dismissable(conn, process)
+    OI.dismiss(conn, process.id, "the portal declaration", known_docs=1)
+
+    for i in range(3):
+        extra = _mail(conn, uid=f"later{i}", title="More correspondence",
+                      when="2026-04-20T09:00:00+00:00", sender=THEM)
+        _extract(conn, extra, direction="inbound")
+
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        process_id=process.id)
+    assert report.settled_items[0].contradicted is True
+
+
+def test_undismissing_returns_it_to_the_open_list(conn, process) -> None:
+    _dismissable(conn, process)
+    OI.dismiss(conn, process.id, "the portal declaration")
+    assert OI.undismiss(conn, process.id, "the portal declaration") is True
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        process_id=process.id)
+    assert len(report.items) == 1
+
+
+def test_a_passed_deadline_with_no_activity_asks_once(conn, process) -> None:
+    """"Due 17 Aug, nothing since 2 Apr. Done, or still open?" — a question that
+    can be answered, rather than a line repeated forever."""
+    asked = _mail(conn, uid="due", title="Send it by 17 August",
+                  when="2026-04-02T09:00:00+00:00", sender=THEM)
+    _extract(conn, asked, direction="inbound",
+             requests_of_me=[{"what": "the signed agreement", "due": "2026-04-17"}])
+
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        process_id=process.id)
+    item = next(i for i in report.items if i.kind == OI.UNSATISFIED)
+    assert item.needs_confirmation is True
+    assert item.last_activity == "2026-04-02"
+
+
+def test_a_deadline_that_the_process_moved_past_does_not_ask(conn, process) -> None:
+    """Activity after the deadline answers the question by itself."""
+    asked = _mail(conn, uid="due", title="Send it by 17 April",
+                  when="2026-04-02T09:00:00+00:00", sender=THEM)
+    _extract(conn, asked, direction="inbound",
+             requests_of_me=[{"what": "the signed agreement", "due": "2026-04-17"}])
+    later = _mail(conn, uid="after", title="Thanks, received",
+                  when="2026-04-25T09:00:00+00:00", sender=THEM)
+    _extract(conn, later, direction="inbound")
+
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        process_id=process.id)
+    item = next(i for i in report.items if i.kind == OI.UNSATISFIED)
+    assert item.needs_confirmation is False
+
+
+def test_a_future_deadline_is_not_asked_about(conn, process) -> None:
+    asked = _mail(conn, uid="future", title="Send it by June",
+                  when="2026-04-02T09:00:00+00:00", sender=THEM)
+    _extract(conn, asked, direction="inbound",
+             requests_of_me=[{"what": "the form", "due": "2026-06-30"}])
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        process_id=process.id)
+    assert all(not i.needs_confirmation for i in report.items)

@@ -547,3 +547,39 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
 .gather-what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gather-who { flex: none; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .gather-reason { flex: none; font-size: 10px; opacity: 0.75; }
+
+/* The accept/reject screen. An anchor is permanent, so this gets room to read
+   the evidence rather than being a flag on a command. */
+.picker-row { align-items: center; }
+.picker-row.selected { background: var(--sel); }
+.picker-tick { flex: none; width: 14px; color: var(--accent); }
+.picker-example { flex: none; max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.picker-create { color: var(--accent); }
+
+/* Settled by hand: kept visible rather than deleted, because "done on the 4th"
+   is a fact the reconstruction carries. */
+.gather-row.settled .gather-what { opacity: 0.55; text-decoration: line-through; }
+.chip.contradicted { color: #ffcf70; border-color: rgba(255, 207, 112, 0.4); }
+
+.settle {
+  flex: none;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--dim);
+  font: inherit;
+  font-size: 10px;
+  padding: 1px 7px;
+  cursor: pointer;
+  opacity: 0;
+}
+.gather-row:hover .settle, .gather-row.selected .settle { opacity: 1; }
+.settle:hover { color: var(--fg); border-color: var(--accent); }
+
+/* Asked once, when a deadline has passed with nothing since. */
+.confirm-ask {
+  flex: none;
+  font-size: 10.5px;
+  color: #ffcf70;
+  padding-left: 6px;
+}

@@ -41,7 +41,57 @@ export function GatherView({
 }) {
   const [view, setView] = useState<ProcessView | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [selected, setSelected] = useState(0);
+  const [flash, setFlash] = useState<string | null>(null);
+
+  /**
+   * Settle an item by hand.
+   *
+   * Recorded rather than removed: most obligations in a real process are
+   * discharged somewhere this index cannot see, and an item that no evidence can
+   * ever satisfy would otherwise sit in the list until the list stops being read.
+   */
+  const settle = useCallback(
+    async (item: OpenItem, verdict: "done" | "not_applicable") => {
+      if (!slug) return;
+      try {
+        await api.dismissItem(slug, item.what, { verdict });
+        setFlash(`Marked done — ${item.what.slice(0, 40)}`);
+        setView(await api.process(slug));
+      } catch (cause) {
+        setFlash(cause instanceof ApiError ? cause.message : String(cause));
+      }
+    },
+    [slug],
+  );
+
+  useEffect(() => {
+    if (!flash) return;
+    const timer = setTimeout(() => setFlash(null), 2200);
+    return () => clearTimeout(timer);
+  }, [flash]);
+
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!view) return;
+      const open = view.open_items.items;
+      if (!open.length) return;
+      if (event.key === "ArrowDown" || event.key === "j") {
+        event.preventDefault();
+        setSelected((i) => Math.min(i + 1, open.length - 1));
+      } else if (event.key === "ArrowUp" || event.key === "k") {
+        event.preventDefault();
+        setSelected((i) => Math.max(i - 1, 0));
+      } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "d") {
+        event.preventDefault();
+        const item = open[selected];
+        if (item) void settle(item, "done");
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [view, selected, settle]);
 
   useEffect(() => {
     let live = true;
@@ -59,18 +109,6 @@ export function GatherView({
     };
   }, [slug]);
 
-  const create = useCallback(async () => {
-    setCreating(true);
-    try {
-      const made = await api.createProcess(query);
-      setView(await api.process(made.slug));
-    } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : String(cause));
-    } finally {
-      setCreating(false);
-    }
-  }, [query]);
-
   if (!slug) {
     return (
       <div className="empty">
@@ -79,9 +117,10 @@ export function GatherView({
           Gather reconstructs the state of a process — what was asked, what was
           sent, what is still outstanding.
         </div>
-        <button className="link" onClick={() => void create()} disabled={creating}>
-          {creating ? "Gathering…" : `Create a process from “${query}”`}
-        </button>
+        <div className="empty-detail dim">
+          ⌘P opens the process list, where you can create one from this query and
+          choose its anchors.
+        </div>
       </div>
     );
   }
@@ -100,6 +139,7 @@ export function GatherView({
 
   const counts = view.open_items.counts;
   const items = view.open_items.items;
+  const settledItems = view.open_items.settled ?? [];
   const grouped = KIND_ORDER.map((kind) => ({
     kind,
     items: items.filter((i) => i.kind === kind),
@@ -161,6 +201,34 @@ export function GatherView({
         </div>
       </header>
 
+      {settledItems.length > 0 && (
+        <section className="gather-group">
+          <div className="doc-sub dim">
+            Settled by you · {settledItems.length}
+            {counts.settled_contradicted > 0 &&
+              ` · ${counts.settled_contradicted} with new documents since`}
+          </div>
+          <ul className="gather-items">
+            {settledItems.map((item) => (
+              <li
+                key={item.key}
+                className="gather-row settled"
+                onClick={() => item.doc_ids[0] != null && onOpenDoc(item.doc_ids[0])}
+                title={`settled ${item.settled_at ?? ""}`}
+              >
+                <span className="gather-when">{shortDate(item.settled_at)}</span>
+                <span className="gather-what">{item.what}</span>
+                {item.contradicted && (
+                  <span className="chip contradicted">new documents since</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {flash && <div className="doc-flash">{flash}</div>}
+
       {grouped.map((group) => (
         <section key={group.kind} className="gather-group">
           <div className="doc-sub dim">
@@ -168,7 +236,13 @@ export function GatherView({
           </div>
           <ul className="gather-items">
             {group.items.map((item, index) => (
-              <ItemRow key={`${group.kind}-${index}`} item={item} onOpenDoc={onOpenDoc} />
+              <ItemRow
+                key={item.key || `${group.kind}-${index}`}
+                item={item}
+                selected={items.indexOf(item) === selected}
+                onOpenDoc={onOpenDoc}
+                onSettle={(verdict) => void settle(item, verdict)}
+              />
             ))}
           </ul>
         </section>
@@ -208,15 +282,19 @@ function Stat({ value, label }: { value: string; label: string }) {
 
 function ItemRow({
   item,
+  selected,
   onOpenDoc,
+  onSettle,
 }: {
   item: OpenItem;
+  selected: boolean;
   onOpenDoc: (docId: number) => void;
+  onSettle: (verdict: "done" | "not_applicable") => void;
 }) {
   const overdue = item.kind === "deadline_near" && item.detail === "overdue";
   return (
     <li
-      className={`gather-row${overdue ? " overdue" : ""}`}
+      className={`gather-row${overdue ? " overdue" : ""}${selected ? " selected" : ""}`}
       onClick={() => item.doc_ids[0] != null && onOpenDoc(item.doc_ids[0])}
       title={item.detail ?? undefined}
     >
@@ -226,6 +304,24 @@ function ItemRow({
       <span className="chip gather-reason">
         {item.doc_ids.length} doc{item.doc_ids.length > 1 ? "s" : ""}
       </span>
+      <button
+        className="settle"
+        title="I did this (⌘D)"
+        onClick={(event) => {
+          event.stopPropagation();
+          onSettle("done");
+        }}
+      >
+        done
+      </button>
+      {/* Asked once, when a deadline has passed with nothing since. Not
+          repeated: nagging is how a list teaches somebody to stop reading it. */}
+      {item.needs_confirmation && (
+        <span className="confirm-ask">
+          due {item.when ? shortDate(item.when) : "then"}, nothing since{" "}
+          {item.last_activity ? shortDate(item.last_activity) : "then"} — done?
+        </span>
+      )}
     </li>
   );
 }

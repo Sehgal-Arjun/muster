@@ -200,6 +200,24 @@ export interface OpenItem {
   detail: string | null;
   /** Every item cites its sources; an item without them is an assertion. */
   doc_ids: number[];
+  /** Stable identity of the obligation, independent of wording. */
+  key: string;
+  /** Set when settled by hand: "done" or "not_applicable". */
+  settled: string | null;
+  settled_at: string | null;
+  /** Documents arrived after it was settled; worth a second look. */
+  contradicted: boolean;
+  /** Deadline passed with nothing since. Asked once, not repeated. */
+  needs_confirmation: boolean;
+  last_activity: string | null;
+}
+
+export interface AnchorProposal {
+  id: string;
+  kind: string;
+  value: string;
+  count: number;
+  example: string;
 }
 
 export interface TimelineEntry {
@@ -231,6 +249,9 @@ export interface ProcessView {
       requests_total: number;
       requests_satisfied: number;
       requests_open: number;
+      settled_by_me: number;
+      settled_contradicted: number;
+      awaiting_confirmation: number;
       documents_considered: number;
       documents_unaccounted: number;
       open_without_candidates: number;
@@ -238,6 +259,7 @@ export interface ProcessView {
     };
     next_deadline: string | null;
     items: OpenItem[];
+    settled: OpenItem[];
     unaccounted_doc_ids: number[];
   };
   extraction: { model_id: string; version: number; pending: number };
@@ -271,6 +293,34 @@ async function post<T>(path: string): Promise<T> {
       response.status,
     );
   }
+  return (await response.json()) as T;
+}
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(new URL(path, BASE), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new ApiError("unreachable", `No server at ${BASE}. Run \`muster serve\`.`, 0);
+  }
+  if (!response.ok) {
+    const failed = await response.json().catch(() => null);
+    throw new ApiError(
+      failed?.error?.code ?? "http_error",
+      failed?.error?.message ?? `${response.status} ${response.statusText}`,
+      response.status,
+    );
+  }
+  return (await response.json()) as T;
+}
+
+async function del<T>(path: string): Promise<T> {
+  const response = await fetch(new URL(path, BASE), { method: "DELETE" });
+  if (!response.ok) throw new ApiError("http_error", `${response.status}`, response.status);
   return (await response.json()) as T;
 }
 
@@ -319,10 +369,23 @@ export const api = {
 
   processes: () => get<{ processes: ProcessSummary[] }>("/process"),
   process: (slug: string) => get<ProcessView>(`/process/${slug}`),
-  createProcess: (name: string, acceptTop = 4) =>
-    post<{ slug: string; name: string }>(
-      `/process?name=${encodeURIComponent(name)}&accept_top=${acceptTop}`,
+  /** Candidates for a name. Creates nothing — the accept step is the point. */
+  proposeProcess: (name: string) =>
+    post<{ name: string; slug: string; proposals: AnchorProposal[] }>(
+      `/process/propose?name=${encodeURIComponent(name)}`,
     ),
+  confirmProcess: (name: string, anchors: string[]) =>
+    postJson<{ slug: string; name: string }>("/process/confirm", { name, anchors }),
+
+  addAnchor: (slug: string, kind: string, value: string) =>
+    postJson<{ added: boolean }>(`/process/${slug}/anchor`, { kind, value }),
+  removeAnchor: (slug: string, kind: string, value: string) =>
+    del<{ removed: boolean }>(
+      `/process/${slug}/anchor?kind=${encodeURIComponent(kind)}&value=${encodeURIComponent(value)}`,
+    ),
+
+  dismissItem: (slug: string, what: string, opts: { undo?: boolean; verdict?: string } = {}) =>
+    postJson<{ settled: boolean }>(`/process/${slug}/dismiss`, { what, ...opts }),
   body: (id: number) => get<MessageBody>(`/doc/${id}/body`),
 
   /** Start an incremental sync. Returns at once; poll syncJob for the outcome. */

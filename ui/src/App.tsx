@@ -15,6 +15,7 @@ import { DocView, type View } from "./components/DocView";
 import { EmptyState } from "./components/EmptyState";
 import { FolderJump } from "./components/FolderJump";
 import { GatherView } from "./components/GatherView";
+import { ProcessPicker } from "./components/ProcessPicker";
 import { Footer } from "./components/Footer";
 import { ResultRow } from "./components/ResultRow";
 
@@ -100,6 +101,7 @@ export default function App() {
    */
   const [gatherSlug, setGatherSlug] = useState<string | null>(null);
   const [processes, setProcesses] = useState<ProcessSummary[]>([]);
+  const [picking, setPicking] = useState(false);
   const [syncing, setSyncing] = useState(false);
   // When the last refresh was asked for, so summoning the panel repeatedly does
   // not mean a request each time.
@@ -179,7 +181,7 @@ export default function App() {
 
   const hits = response?.results ?? [];
   const reading = stack.length > 0;
-  const gathering = gatherSlug !== null;
+  const gathering = gatherSlug !== null || picking;
   const current: Hit | null = hits[selected] ?? null;
 
   useEffect(() => inputRef.current?.focus(), []);
@@ -238,10 +240,19 @@ export default function App() {
     };
   }, [refresh, reviveServer]);
 
-  useEffect(() => {
+  const refreshProcesses = useCallback(async () => {
     if (USE_MOCK) return;
-    api.processes().then((body) => setProcesses(body.processes)).catch(() => {});
+    try {
+      setProcesses((await api.processes()).processes);
+    } catch {
+      // The list is a convenience for matching Tab; failing to load it should
+      // not break searching.
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshProcesses();
+  }, [refreshProcesses]);
 
   /**
    * The process a query is asking about, if any.
@@ -548,6 +559,10 @@ export default function App() {
       if (showActions) return;
       // Reading something? Escape is "back", not "close". Only a reader who is
       // already looking at the results means dismiss.
+      if (picking) {
+        setPicking(false);
+        return;
+      }
       if (stack.length) {
         back();
         return;
@@ -560,13 +575,18 @@ export default function App() {
     };
     document.addEventListener("keydown", onEscape);
     return () => document.removeEventListener("keydown", onEscape);
-  }, [showActions, hide, stack.length, back, gatherSlug]);
+  }, [showActions, hide, stack.length, back, gatherSlug, picking]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (showActions) return;
     // The document view binds its own keys — j/k, enter into an attachment,
     // copy — and they mean different things there than they do over a list.
     if (stack.length) return;
+    // Gather mode is not a list of hits. Leaving list navigation live behind it
+    // meant Enter opened whichever search result happened to be selected,
+    // which is not the thing on screen.
+    if (picking) return;
+    if (gatherSlug !== null && event.key !== "Tab") return;
     const meta = event.metaKey || event.ctrlKey;
 
     if (event.key === "ArrowDown") {
@@ -580,6 +600,9 @@ export default function App() {
       // Enter reads it here. Leaving the panel to open Gmail or Preview is the
       // failure this view exists to remove; ⌘↵ still reveals the original.
       void (meta ? reveal(current) : read(current));
+    } else if (meta && event.key.toLowerCase() === "p") {
+      event.preventDefault();
+      setPicking(true);
     } else if (event.key === "Tab") {
       // Promote the query from "find me the thing" to "what is the state of the
       // thing". Tab because it reads as going deeper into what is already there.
@@ -609,7 +632,7 @@ export default function App() {
           placeholder="Search everything you have ever received…"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          readOnly={reading}
+          readOnly={reading || gathering}
           spellCheck={false}
           autoComplete="off"
         />
@@ -623,7 +646,18 @@ export default function App() {
       {folder && !reading && !gathering && <FolderJump folder={folder} onOpen={() => void openFolder()} />}
 
       <div className={`results${reading || gathering ? " reading" : ""}`} ref={resultsRef}>
-        {gatherSlug !== null && !reading ? (
+        {picking ? (
+          <ProcessPicker
+            processes={processes}
+            query={query}
+            onOpen={(slug) => {
+              setPicking(false);
+              setGatherSlug(slug);
+            }}
+            onCreated={() => void refreshProcesses()}
+            onClose={() => setPicking(false)}
+          />
+        ) : gatherSlug !== null && !reading ? (
           <GatherView
             slug={gatherSlug || null}
             query={query}

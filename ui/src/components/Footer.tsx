@@ -6,6 +6,7 @@ const SEARCH_HINTS: Array<[string, string]> = [
   ["⌘↵", "reveal in Finder"],
   ["⌘O", "open"],
   ["⇥", "gather"],
+  ["⌘P", "processes"],
   ["⌘⇧F", "open folder"],
   ["⌘K", "actions"],
   ["⌘1/2/3", "mode"],

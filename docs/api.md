@@ -356,12 +356,42 @@ the thing"; these answer "what is the state of the thing".
                    "anchors": [ { "kind": "domain", "value": "sponsor.example" } ] } ] }
 ```
 
-### `POST /process?name=…&accept_top=N`
+### `POST /process/propose?name=…` and `POST /process/confirm`
 
-Creates a process and mines the top search results for recurring identifiers.
-`accept_top` anchors on the N best-evidenced proposals; **every** proposal is
-returned either way, so a caller can present the rest rather than have them
-applied silently.
+Two steps, because the accept/reject decision is the whole reason anchors can be
+trusted. An anchor is permanent and pulls in documents forever, so it should be
+something somebody chose rather than a threshold somebody set.
+
+`propose` creates nothing and returns candidates:
+
+```json
+{ "slug": "tum-enrolment", "name": "TUM enrolment",
+  "proposals": [ { "id": "domain:sponsor.example", "kind": "domain",
+                   "value": "sponsor.example", "count": 31,
+                   "example": "J-1 Visa Sponsorship Approved" } ] }
+```
+
+`confirm` takes `{ "name": …, "anchors": ["domain:sponsor.example", …] }` and
+creates the process with exactly those.
+
+`POST /process/{slug}/anchor` and `DELETE /process/{slug}/anchor?kind=&value=`
+add and remove anchors afterwards; both return the resulting anchor list, and the
+next gather reflects them immediately.
+
+### `POST /process/{slug}/dismiss`
+
+`{ "what": "the portal declaration", "verdict": "done" }`, or `{"undo": true}`.
+
+Records that the user settled an item themselves. **Stored as evidence, not as a
+delete**: most obligations in a real process are discharged somewhere this index
+cannot see — a web portal, a phone call — and an absence would simply be
+re-derived as open on the next run. The item moves to `open_items.settled` with
+its date, keeps its citations, and is keyed on the request's words rather than
+its wording, so settling one phrasing settles the reminder that restated it.
+
+`known_docs` records how large the set was at the time. If documents arrive
+afterwards, the item comes back marked `contradicted` rather than being silently
+kept or silently dropped.
 
 ### `GET /process/{slug}/gather` — the artifact
 
@@ -440,6 +470,13 @@ Three counts exist to stop the report being confidently wrong:
   this was 53 of 66: those were done through a web portal this index cannot see,
   and without the distinction the answer reads as "you owe 66 things".
 - `extraction.pending` — documents not yet examined at all.
+- `settled_by_me` / `settled_contradicted` — items the user closed by hand, and
+  how many of those have new documents bearing on them.
+- `awaiting_confirmation` — items whose deadline passed with no activity since.
+  Each carries `needs_confirmation` and `last_activity`, so a client can ask
+  once — "due 17 Aug, nothing since 2 Apr; done, or still open?" — rather than
+  repeating the line forever, which is how a list teaches somebody to stop
+  reading it.
 
 Anything the model concludes is derived and stays out of search.
 

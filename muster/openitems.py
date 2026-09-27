@@ -59,6 +59,21 @@ class OpenItem:
     when: str | None = None
     counterparty: str | None = None
     detail: str | None = None
+    # Set when the user settled this themselves. The item stays in history
+    # rather than disappearing, because "done on the 4th" is a fact and an
+    # absence would simply be re-derived as open.
+    settled: str | None = None
+    settled_at: str | None = None
+    # True when documents have arrived since it was settled. Shown, not acted
+    # on: the dismissal was a judgement about what was known at the time.
+    contradicted: bool = False
+    # True when the deadline has passed with no activity since. Asked once.
+    needs_confirmation: bool = False
+    last_activity: str | None = None
+
+    @property
+    def identity(self) -> str:
+        return " ".join(sorted(_tokens(self.what))) or self.what.strip().lower()
 
     def as_json(self) -> dict:
         return {
@@ -68,6 +83,12 @@ class OpenItem:
             "counterparty": self.counterparty,
             "detail": self.detail,
             "doc_ids": self.doc_ids,
+            "key": self.identity,
+            "settled": self.settled,
+            "settled_at": self.settled_at,
+            "contradicted": self.contradicted,
+            "needs_confirmation": self.needs_confirmation,
+            "last_activity": self.last_activity,
         }
 
 
@@ -89,6 +110,9 @@ class OpenItemsReport:
     # it probably was not done.
     open_without_candidates: int = 0
     duplicates_collapsed: int = 0
+    # Settled by the user rather than by evidence. Kept out of the open list and
+    # counted separately, so the header stays true.
+    settled_items: list = field(default_factory=list)
 
     @property
     def by_kind(self) -> dict[str, list[OpenItem]]:
@@ -109,9 +133,17 @@ class OpenItemsReport:
                 "documents_unaccounted": len(self.documents_unaccounted),
                 "open_without_candidates": self.open_without_candidates,
                 "duplicates_collapsed": self.duplicates_collapsed,
+                "settled_by_me": len(self.settled_items),
+                "settled_contradicted": sum(
+                    1 for i in self.settled_items if i.contradicted
+                ),
+                "awaiting_confirmation": sum(
+                    1 for i in self.items if i.needs_confirmation
+                ),
             },
             "next_deadline": self.next_deadline,
             "items": [i.as_json() for i in self.items],
+            "settled": [i.as_json() for i in self.settled_items],
             "unaccounted_doc_ids": self.documents_unaccounted,
         }
 
@@ -282,6 +314,65 @@ def satisfies(
     return verdict, reason
 
 
+# --- dismissal -------------------------------------------------------------
+#
+# Most obligations in a real process are discharged somewhere this index cannot
+# see. An item that no evidence can ever satisfy will sit in the list forever,
+# and a list with permanent residents stops being read.
+
+
+def item_key(what: str) -> str:
+    """The identity of an obligation, independent of how it was worded.
+
+    Token-based and order-independent, matching how duplicate requests are
+    collapsed: settling "a copy of your passport" also settles the reminder that
+    restated it, because they are one obligation.
+    """
+    return " ".join(sorted(_tokens(what))) or what.strip().lower()
+
+
+def dismiss(
+    conn: sqlite3.Connection,
+    process_id: int,
+    what: str,
+    *,
+    verdict: str = "done",
+    note: str | None = None,
+    known_docs: int = 0,
+) -> None:
+    """Record that the user settled this themselves.
+
+    Stored, not deleted. "I did this on the 4th" is a fact the reconstruction
+    should carry — an absence would just be re-derived as open on the next run.
+    """
+    conn.execute(
+        "INSERT OR REPLACE INTO item_dismissals"
+        " (process_id, item_key, verdict, note, settled_at, known_docs)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (process_id, item_key(what), verdict, note,
+         datetime.now(UTC).isoformat(timespec="seconds"), known_docs),
+    )
+    conn.commit()
+
+
+def undismiss(conn: sqlite3.Connection, process_id: int, what: str) -> bool:
+    cursor = conn.execute(
+        "DELETE FROM item_dismissals WHERE process_id = ? AND item_key = ?",
+        (process_id, item_key(what)),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def dismissals(conn: sqlite3.Connection, process_id: int) -> dict[str, sqlite3.Row]:
+    return {
+        row["item_key"]: row
+        for row in conn.execute(
+            "SELECT * FROM item_dismissals WHERE process_id = ?", (process_id,)
+        )
+    }
+
+
 # --- the query -------------------------------------------------------------
 
 
@@ -292,6 +383,7 @@ def compute(
     model: str,
     today: date | None = None,
     ask=None,
+    process_id: int | None = None,
 ) -> OpenItemsReport:
     """Open items for a gathered process. A set difference, not a summary."""
     from muster import extraction
@@ -348,7 +440,10 @@ def compute(
     # in the size of the set, which on 300 documents is felt.
     position = {doc_id: i for i, doc_id in enumerate(doc_ids)}
 
+    settled = dismissals(conn, process_id) if process_id else {}
+
     items: list[OpenItem] = []
+    settled_items: list[OpenItem] = []
     requests_total = requests_satisfied = 0
     without_candidates = 0
     # The same requirement restated in two documents is one obligation, not two.
@@ -420,6 +515,7 @@ def compute(
                 ),
                 doc_ids=[doc_id],
             )
+
             seen_requests[key] = item
             items.append(item)
 
@@ -463,6 +559,48 @@ def compute(
                 doc_ids=[doc_id],
             ))
 
+    # Dismissals apply to every kind, not only to unsatisfied requests. A
+    # deadline the user has dealt with is as settled as a document they sent, and
+    # handling only one kind meant a dismissal was stored and then ignored.
+    if settled:
+        still_open: list[OpenItem] = []
+        for item in items:
+            record = settled.get(item.identity)
+            if record is None:
+                still_open.append(item)
+                continue
+            item.settled = record["verdict"]
+            item.settled_at = record["settled_at"]
+            # Documents arriving after it was settled may bear on it. Surfaced
+            # rather than assumed either way: the dismissal was a judgement about
+            # what was known at the time, not a permanent silence.
+            item.contradicted = len(doc_ids) > (record["known_docs"] or 0)
+            settled_items.append(item)
+        items = still_open
+
+    # An item whose deadline has passed with nothing happening since is asked
+    # about once rather than repeated every time the process is opened. Nagging
+    # is how a list teaches somebody to stop reading it; a single direct question
+    # — "due 17 Aug, nothing since 2 Apr; done, or still open?" — is answerable.
+    last_activity = max(
+        (rows[d]["doc_date"] for d in doc_ids if d in rows and rows[d]["doc_date"]),
+        default=None,
+    )
+    for item in items:
+        due = parse_when(item.when)
+        if due is None or due >= today:
+            continue
+        # Activity *after* the deadline means the process moved on and the
+        # question answers itself.
+        moved_on = any(
+            (rows[d]["doc_date"] or "") [:10] > due.isoformat()
+            for d in doc_ids if d in rows
+        )
+        if moved_on:
+            continue
+        item.needs_confirmation = True
+        item.last_activity = last_activity[:10] if last_activity else None
+
     deadlines = sorted(i.when for i in items if i.kind == DEADLINE_NEAR and i.when)
 
     # Overdue first, then soonest; unsatisfied before promised, since something
@@ -481,4 +619,5 @@ def compute(
         next_deadline=deadlines[0] if deadlines else None,
         open_without_candidates=without_candidates,
         duplicates_collapsed=collapsed,
+        settled_items=settled_items,
     )

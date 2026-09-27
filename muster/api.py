@@ -25,7 +25,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import (
+    BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -279,7 +281,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         # The Tauri shell and a browser during development. Nothing else: this
         # serves an entire personal mailbox with no authentication.
         allow_origin_regex=r"^(tauri://localhost|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?)$",
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["*"],
     )
 
@@ -385,17 +387,17 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             ]
         }
 
-    @app.post("/process")
-    def process_create(
+    @app.post("/process/propose")
+    def process_propose(
         name: str = Query(..., description="What the process is called."),
-        accept_top: int = Query(0, ge=0, le=20,
-                                description="Anchor on the N best proposals."),
         _db: None = Depends(require_db),
     ) -> dict:
-        """Create a process, optionally taking the strongest anchor proposals.
+        """Anchor candidates for a name. Creates nothing.
 
-        Proposals are returned whether or not they were taken, so a caller can
-        show them and add the rest deliberately. Nothing is anchored implicitly.
+        The accept/reject step is the whole reason anchors can be trusted: an
+        anchor is permanent and pulls in documents forever, so it should be a
+        decision somebody made rather than a threshold somebody set. Splitting
+        propose from confirm is what lets a UI hold that conversation.
         """
         from muster import processes
 
@@ -405,21 +407,84 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise ApiError(409, "bad_request", f"a process named {slug!r} exists")
 
         proposals = processes.propose(conn, name, own_addresses=cfg.own_addresses)
-        process = processes.create(conn, name, slug)
-        taken = []
-        for proposal in proposals[:accept_top]:
-            if processes.add_anchor(conn, process.id, proposal.kind, proposal.value):
-                taken.append({"kind": proposal.kind, "value": proposal.value})
-
         return {
-            "slug": process.slug,
-            "name": process.name,
-            "anchored": taken,
+            "name": name,
+            "slug": slug,
             "proposals": [
-                {"kind": p.kind, "value": p.value, "count": p.count, "example": p.example}
+                {
+                    # Stable within a proposal set, so a client can send back
+                    # what it accepted without echoing the whole record.
+                    "id": f"{p.kind}:{p.value}",
+                    "kind": p.kind, "value": p.value,
+                    "count": p.count, "example": p.example,
+                }
                 for p in proposals
             ],
         }
+
+    @app.post("/process/confirm")
+    def process_confirm(
+        body: dict = Body(...),
+        _db: None = Depends(require_db),
+    ) -> dict:
+        """Create a process with exactly the anchors that were accepted."""
+        from muster import processes
+
+        name = (body.get("name") or "").strip()
+        if not name:
+            raise ApiError(400, "bad_request", "name is required")
+        accepted = body.get("anchors") or []
+        if not isinstance(accepted, list):
+            raise ApiError(400, "bad_request", "anchors must be a list")
+
+        conn = _connection(cfg)
+        slug = processes.slugify(name)
+        if processes.get(conn, slug):
+            raise ApiError(409, "bad_request", f"a process named {slug!r} exists")
+
+        process = processes.create(conn, name, slug)
+        added = []
+        for entry in accepted:
+            kind, _, value = str(entry).partition(":") if isinstance(entry, str) else (
+                entry.get("kind", ""), "", entry.get("value", "")
+            )
+            if not kind or not value:
+                continue
+            if processes.add_anchor(conn, process.id, kind, value):
+                added.append({"kind": kind, "value": value})
+
+        return {"slug": process.slug, "name": process.name, "anchors": added}
+
+    @app.post("/process/{slug}/anchor")
+    def process_anchor_add(slug: str, body: dict = Body(...),
+                           _db: None = Depends(require_db)) -> dict:
+        from muster import processes
+
+        conn = _connection(cfg)
+        process = processes.get(conn, slug)
+        if process is None:
+            raise ApiError(404, "not_found", f"No process {slug!r}.")
+        kind, value = body.get("kind"), body.get("value")
+        if not kind or not value:
+            raise ApiError(400, "bad_request", "kind and value are required")
+        added = processes.add_anchor(conn, process.id, kind, value)
+        return {"added": added, "anchors": [
+            {"kind": a.kind, "value": a.value} for a in processes.get(conn, slug).anchors
+        ]}
+
+    @app.delete("/process/{slug}/anchor")
+    def process_anchor_remove(slug: str, kind: str = Query(...), value: str = Query(...),
+                              _db: None = Depends(require_db)) -> dict:
+        from muster import processes
+
+        conn = _connection(cfg)
+        process = processes.get(conn, slug)
+        if process is None:
+            raise ApiError(404, "not_found", f"No process {slug!r}.")
+        removed = processes.remove_anchor(conn, process.id, kind, value)
+        return {"removed": removed, "anchors": [
+            {"kind": a.kind, "value": a.value} for a in processes.get(conn, slug).anchors
+        ]}
 
     @app.get("/process/{slug}/gather")
     def process_gather(slug: str, _db: None = Depends(require_db)) -> dict:
@@ -446,7 +511,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise ApiError(404, "not_found", f"No process {slug!r}.")
 
         result = gather_mod.gather(conn, process)
-        report = openitems.compute(conn, result, model=cfg.extract.model_id)
+        report = openitems.compute(
+            conn, result, model=cfg.extract.model_id, process_id=process.id
+        )
 
         rows = {r["id"]: r for r in _process_rows(conn, result.doc_ids)}
         timeline = [
@@ -492,6 +559,42 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             },
             "timeline": timeline,
         }
+
+    @app.post("/process/{slug}/dismiss")
+    def process_dismiss(slug: str, body: dict = Body(...),
+                        _db: None = Depends(require_db)) -> dict:
+        """Settle an open item by hand.
+
+        Recorded as evidence rather than deleted: most obligations in a real
+        process are discharged somewhere this index cannot see, and an absence
+        would simply be re-derived as open on the next run.
+        """
+        from muster import gather as gather_mod
+        from muster import openitems, processes
+
+        conn = _connection(cfg)
+        process = processes.get(conn, slug)
+        if process is None:
+            raise ApiError(404, "not_found", f"No process {slug!r}.")
+        what = (body.get("what") or "").strip()
+        if not what:
+            raise ApiError(400, "bad_request", "what is required")
+        verdict = body.get("verdict") or "done"
+        if verdict not in ("done", "not_applicable"):
+            raise ApiError(400, "bad_request", "verdict must be done or not_applicable")
+
+        if body.get("undo"):
+            openitems.undismiss(conn, process.id, what)
+            return {"settled": False}
+
+        # Recorded with the size of the set at the time, so documents arriving
+        # later can be flagged as bearing on a decision already made.
+        known = gather_mod.gather(conn, process).size
+        openitems.dismiss(
+            conn, process.id, what, verdict=verdict,
+            note=body.get("note"), known_docs=known,
+        )
+        return {"settled": True, "verdict": verdict, "known_docs": known}
 
     @app.get("/folders")
     def folders(
