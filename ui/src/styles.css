@@ -497,3 +497,53 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
 .folder-jump .icon { color: var(--accent); }
 .folder-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder-label { font-size: 11px; }
+
+/* --- gather mode -------------------------------------------------------- */
+
+/* The state of a process rather than a list of matches. Every figure here is a
+   query result, which is why it can be read at a glance. */
+.gather-counts {
+  display: flex;
+  gap: 22px;
+  margin: 12px 0 4px;
+}
+.stat { display: flex; flex-direction: column; gap: 1px; }
+.stat-value { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* The uncomfortable numbers get the same prominence as the flattering ones: a
+   confident answer that is wrong is the failure this whole design avoids. */
+.gather-caveats { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.caveat {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--dim);
+  padding-left: 9px;
+  border-left: 2px solid var(--line);
+}
+.caveat.warn { color: #ffcf70; border-left-color: rgba(255, 207, 112, 0.5); }
+.caveat code { font-size: 10.5px; }
+
+.gather-group { margin-top: 18px; }
+.gather-items { list-style: none; margin: 0; padding: 0; }
+.gather-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.gather-row:hover { background: var(--sel); }
+.gather-row.overdue .gather-when { color: #ff8f8f; font-weight: 600; }
+.gather-when {
+  flex: none;
+  width: 84px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+  font-size: 11px;
+}
+.gather-what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gather-who { flex: none; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.gather-reason { flex: none; font-size: 10px; opacity: 0.75; }

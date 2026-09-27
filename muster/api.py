@@ -363,6 +363,136 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "took_ms": round((time.perf_counter() - started) * 1000, 1),
         }
 
+    # --- processes ---------------------------------------------------------
+    #
+    # The gather artifact is public and reusable: open items are one renderer
+    # over it, and research, drafting and briefing will be others. Its shape is
+    # versioned for that reason.
+
+    @app.get("/process")
+    def process_list(_db: None = Depends(require_db)) -> dict:
+        from muster import processes
+
+        conn = _connection(cfg)
+        return {
+            "processes": [
+                {
+                    "slug": p.slug, "name": p.name,
+                    "created_at": p.created_at, "updated_at": p.updated_at,
+                    "anchors": [{"kind": a.kind, "value": a.value} for a in p.anchors],
+                }
+                for p in processes.all_processes(conn)
+            ]
+        }
+
+    @app.post("/process")
+    def process_create(
+        name: str = Query(..., description="What the process is called."),
+        accept_top: int = Query(0, ge=0, le=20,
+                                description="Anchor on the N best proposals."),
+        _db: None = Depends(require_db),
+    ) -> dict:
+        """Create a process, optionally taking the strongest anchor proposals.
+
+        Proposals are returned whether or not they were taken, so a caller can
+        show them and add the rest deliberately. Nothing is anchored implicitly.
+        """
+        from muster import processes
+
+        conn = _connection(cfg)
+        slug = processes.slugify(name)
+        if processes.get(conn, slug):
+            raise ApiError(409, "bad_request", f"a process named {slug!r} exists")
+
+        proposals = processes.propose(conn, name, own_addresses=cfg.own_addresses)
+        process = processes.create(conn, name, slug)
+        taken = []
+        for proposal in proposals[:accept_top]:
+            if processes.add_anchor(conn, process.id, proposal.kind, proposal.value):
+                taken.append({"kind": proposal.kind, "value": proposal.value})
+
+        return {
+            "slug": process.slug,
+            "name": process.name,
+            "anchored": taken,
+            "proposals": [
+                {"kind": p.kind, "value": p.value, "count": p.count, "example": p.example}
+                for p in proposals
+            ],
+        }
+
+    @app.get("/process/{slug}/gather")
+    def process_gather(slug: str, _db: None = Depends(require_db)) -> dict:
+        """The raw gather artifact. Deterministic, and reusable by other features."""
+        from muster import gather as gather_mod
+        from muster import processes
+
+        conn = _connection(cfg)
+        process = processes.get(conn, slug)
+        if process is None:
+            raise ApiError(404, "not_found", f"No process {slug!r}.")
+        return gather_mod.gather(conn, process).as_json()
+
+    @app.get("/process/{slug}")
+    def process_show(slug: str, _db: None = Depends(require_db)) -> dict:
+        """Timeline, open items, and everything this could not account for."""
+        from muster import extraction
+        from muster import gather as gather_mod
+        from muster import openitems, processes
+
+        conn = _connection(cfg)
+        process = processes.get(conn, slug)
+        if process is None:
+            raise ApiError(404, "not_found", f"No process {slug!r}.")
+
+        result = gather_mod.gather(conn, process)
+        report = openitems.compute(conn, result, model=cfg.extract.model_id)
+
+        rows = {r["id"]: r for r in _process_rows(conn, result.doc_ids)}
+        timeline = [
+            {
+                "doc_id": doc_id,
+                "date": rows[doc_id]["doc_date"] if doc_id in rows else None,
+                "title": rows[doc_id]["title"] if doc_id in rows else None,
+                "source": rows[doc_id]["source"] if doc_id in rows else None,
+                "kind": _kind(
+                    rows[doc_id]["mime"] if doc_id in rows else None,
+                    rows[doc_id]["source_uid"] if doc_id in rows else "",
+                ),
+                "counterparty": rows[doc_id]["counterparty"] if doc_id in rows else None,
+                # Why this document is here. Never omitted.
+                "reason": result.inclusions[doc_id].reason,
+                "via": result.inclusions[doc_id].via,
+            }
+            for doc_id in result.doc_ids
+        ]
+
+        pending = extraction.pending(conn, result.doc_ids)
+
+        return {
+            "process": {
+                "slug": process.slug, "name": process.name,
+                "anchors": [{"kind": a.kind, "value": a.value} for a in process.anchors],
+            },
+            "gather": {
+                "version": result.version,
+                "size": result.size,
+                "capped": result.capped,
+                "dropped": result.dropped,
+                "depth_reached": result.depth_reached,
+                # Documents the seed found that no anchor explains: the count
+                # that says an anchor is probably missing.
+                "seed_only": len(result.seed_only),
+            },
+            "open_items": report.as_json(),
+            "extraction": {
+                "model_id": cfg.extract.model_id,
+                "version": extraction.EXTRACTOR_VERSION,
+                "pending": len(pending),
+            },
+            "timeline": timeline,
+        }
+
     @app.get("/folders")
     def folders(
         q: str = Query(..., description="A name, not a sentence."),
@@ -949,6 +1079,19 @@ def _render_thumb(data: bytes, mime: str | None, size: int) -> bytes | None:
         out = io.BytesIO()
         image.save(out, format="PNG", optimize=True)
         return out.getvalue()
+
+
+def _process_rows(conn: sqlite3.Connection, doc_ids: list[int]) -> list[sqlite3.Row]:
+    if not doc_ids:
+        return []
+    out: list[sqlite3.Row] = []
+    for start in range(0, len(doc_ids), 500):
+        batch = doc_ids[start : start + 500]
+        out.extend(conn.execute(
+            "SELECT id, title, doc_date, source, source_uid, mime, counterparty"
+            f" FROM docs WHERE id IN ({','.join('?' * len(batch))})", batch
+        ).fetchall())
+    return out
 
 
 def _blob_size(store: BlobStore, blob_path: str | None) -> int | None:

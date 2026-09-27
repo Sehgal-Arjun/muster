@@ -6,6 +6,7 @@ import {
   type FolderHit,
   type Hit,
   type Mode,
+  type ProcessSummary,
   type SearchResponse,
 } from "./api";
 import { mockSearchFor, mockStatus } from "./mock";
@@ -13,6 +14,7 @@ import { Actions, type Action } from "./components/Actions";
 import { DocView, type View } from "./components/DocView";
 import { EmptyState } from "./components/EmptyState";
 import { FolderJump } from "./components/FolderJump";
+import { GatherView } from "./components/GatherView";
 import { Footer } from "./components/Footer";
 import { ResultRow } from "./components/ResultRow";
 
@@ -92,6 +94,12 @@ export default function App() {
   const [openDoc, setOpenDoc] = useState<DocResponse | null>(null);
   /** A directory the query might have meant. Never mixed into the results. */
   const [folder, setFolder] = useState<FolderHit | null>(null);
+  /**
+   * Gather mode. Null means the results list; a slug or the empty string means
+   * the state of a process rather than a list of matches.
+   */
+  const [gatherSlug, setGatherSlug] = useState<string | null>(null);
+  const [processes, setProcesses] = useState<ProcessSummary[]>([]);
   const [syncing, setSyncing] = useState(false);
   // When the last refresh was asked for, so summoning the panel repeatedly does
   // not mean a request each time.
@@ -171,6 +179,7 @@ export default function App() {
 
   const hits = response?.results ?? [];
   const reading = stack.length > 0;
+  const gathering = gatherSlug !== null;
   const current: Hit | null = hits[selected] ?? null;
 
   useEffect(() => inputRef.current?.focus(), []);
@@ -228,6 +237,32 @@ export default function App() {
       void unlisten.then((stop) => stop());
     };
   }, [refresh, reviveServer]);
+
+  useEffect(() => {
+    if (USE_MOCK) return;
+    api.processes().then((body) => setProcesses(body.processes)).catch(() => {});
+  }, []);
+
+  /**
+   * The process a query is asking about, if any.
+   *
+   * Matched on the name rather than searched for: a process is a thing the user
+   * named, and guessing which one they meant by similarity would make the same
+   * keystrokes open different processes on different days.
+   */
+  const matchProcess = useCallback(
+    (text: string): string | null => {
+      const wanted = text.trim().toLowerCase();
+      if (!wanted) return null;
+      const exact = processes.find((p) => p.name.toLowerCase() === wanted);
+      if (exact) return exact.slug;
+      const partial = processes.find(
+        (p) => p.name.toLowerCase().includes(wanted) || wanted.includes(p.name.toLowerCase()),
+      );
+      return partial?.slug ?? null;
+    },
+    [processes],
+  );
 
   useEffect(() => {
     if (USE_MOCK) {
@@ -517,11 +552,15 @@ export default function App() {
         back();
         return;
       }
+      if (gatherSlug !== null) {
+        setGatherSlug(null);
+        return;
+      }
       void hide();
     };
     document.addEventListener("keydown", onEscape);
     return () => document.removeEventListener("keydown", onEscape);
-  }, [showActions, hide, stack.length, back]);
+  }, [showActions, hide, stack.length, back, gatherSlug]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (showActions) return;
@@ -541,6 +580,11 @@ export default function App() {
       // Enter reads it here. Leaving the panel to open Gmail or Preview is the
       // failure this view exists to remove; ⌘↵ still reveals the original.
       void (meta ? reveal(current) : read(current));
+    } else if (event.key === "Tab") {
+      // Promote the query from "find me the thing" to "what is the state of the
+      // thing". Tab because it reads as going deeper into what is already there.
+      event.preventDefault();
+      if (query.trim()) setGatherSlug(matchProcess(query) ?? "");
     } else if (meta && event.shiftKey && event.key.toLowerCase() === "f") {
       event.preventDefault();
       void openFolder();
@@ -576,10 +620,19 @@ export default function App() {
         )}
       </div>
 
-      {folder && !reading && <FolderJump folder={folder} onOpen={() => void openFolder()} />}
+      {folder && !reading && !gathering && <FolderJump folder={folder} onOpen={() => void openFolder()} />}
 
-      <div className={`results${reading ? " reading" : ""}`} ref={resultsRef}>
-        {reading ? (
+      <div className={`results${reading || gathering ? " reading" : ""}`} ref={resultsRef}>
+        {gatherSlug !== null && !reading ? (
+          <GatherView
+            slug={gatherSlug || null}
+            query={query}
+            onOpenDoc={(docId) => {
+              listScroll.current = resultsRef.current?.scrollTop ?? 0;
+              setStack([{ kind: "doc", id: docId }]);
+            }}
+          />
+        ) : reading ? (
           <DocView
             view={stack[stack.length - 1]!}
             query={query}

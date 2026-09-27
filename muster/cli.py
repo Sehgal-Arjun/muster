@@ -438,7 +438,7 @@ def process_extract(
             typer.echo(f"\r  {done}/{total}  doc {doc_id}   ", nl=False)
 
         extracted, failed = extraction.extract_set(
-            conn, doc_ids, model=model or extraction.DEFAULT_MODEL,
+            conn, doc_ids, model=model or cfg.extract.model_id,
             owner=owner, progress=report,
             should_stop=lambda: is_paused(cfg.home),
         )

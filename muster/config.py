@@ -76,6 +76,17 @@ class EmbedConfig:
 
 
 @dataclass(frozen=True)
+class ExtractConfig:
+    """The local model that reads one document at a time.
+
+    Separate from EmbedConfig: they are different models doing different jobs,
+    and swapping one must not invalidate the other's cache.
+    """
+
+    model_id: str = "qwen2.5:14b"
+
+
+@dataclass(frozen=True)
 class SearchConfig:
     """Ranking knobs.
 
@@ -174,6 +185,7 @@ class Config:
     gmail: GmailConfig
     embed: EmbedConfig = field(default_factory=EmbedConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
+    extract: ExtractConfig = field(default_factory=ExtractConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     redaction: RedactionConfig = field(default_factory=RedactionConfig)
     # Addresses ("notifications@github.com") or bare domains ("substack.com",
@@ -216,6 +228,7 @@ def load_config(home: Path | None = None) -> Config:
     gmail = raw.get("gmail", {})
     embed = raw.get("embed", {})
     files = raw.get("files", {})
+    extract = raw.get("extract", {})
     search = raw.get("search", {})
     redaction = raw.get("redaction", {})
 
@@ -240,6 +253,9 @@ def load_config(home: Path | None = None) -> Config:
             excluded_dirs=tuple(str(d) for d in files.get("excluded_dirs", ())),
             folder_roots=tuple(str(r) for r in files.get("folder_roots", FilesConfig.folder_roots)),
             folder_depth=int(files.get("folder_depth", FilesConfig.folder_depth)),
+        ),
+        extract=ExtractConfig(
+            model_id=extract.get("model_id", ExtractConfig.model_id),
         ),
         search=SearchConfig(
             title_weight=float(search.get("title_weight", 1.0)),

@@ -177,6 +177,73 @@ export interface FolderHit {
   depth: number;
 }
 
+// --- processes -------------------------------------------------------------
+//
+// The gather artifact is versioned because other features will consume it; open
+// items are one renderer over it, not the only one.
+
+export interface ProcessSummary {
+  slug: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  anchors: { kind: string; value: string }[];
+}
+
+export type OpenItemKind = "deadline_near" | "unsatisfied" | "unanswered";
+
+export interface OpenItem {
+  kind: OpenItemKind;
+  what: string;
+  when: string | null;
+  counterparty: string | null;
+  detail: string | null;
+  /** Every item cites its sources; an item without them is an assertion. */
+  doc_ids: number[];
+}
+
+export interface TimelineEntry {
+  doc_id: number;
+  date: string | null;
+  title: string | null;
+  source: string;
+  kind: Kind;
+  counterparty: string | null;
+  /** anchor:<kind> | edge:<name> | seed_only. Never omitted. */
+  reason: string;
+  via: string | null;
+}
+
+export interface ProcessView {
+  process: { slug: string; name: string; anchors: { kind: string; value: string }[] };
+  gather: {
+    version: number;
+    size: number;
+    capped: boolean;
+    dropped: number;
+    depth_reached: number;
+    /** Documents the seed found that no anchor explains — a missing anchor. */
+    seed_only: number;
+  };
+  open_items: {
+    version: number;
+    counts: {
+      requests_total: number;
+      requests_satisfied: number;
+      requests_open: number;
+      documents_considered: number;
+      documents_unaccounted: number;
+      open_without_candidates: number;
+      duplicates_collapsed: number;
+    };
+    next_deadline: string | null;
+    items: OpenItem[];
+    unaccounted_doc_ids: number[];
+  };
+  extraction: { model_id: string; version: number; pending: number };
+  timeline: TimelineEntry[];
+}
+
 export class ApiError extends Error {
   constructor(
     readonly code: string,
@@ -249,6 +316,13 @@ export const api = {
 
   doc: (id: number) => get<DocResponse>(`/doc/${id}`),
   folders: (q: string) => get<{ folders: FolderHit[] }>("/folders", { q }),
+
+  processes: () => get<{ processes: ProcessSummary[] }>("/process"),
+  process: (slug: string) => get<ProcessView>(`/process/${slug}`),
+  createProcess: (name: string, acceptTop = 4) =>
+    post<{ slug: string; name: string }>(
+      `/process?name=${encodeURIComponent(name)}&accept_top=${acceptTop}`,
+    ),
   body: (id: number) => get<MessageBody>(`/doc/${id}/body`),
 
   /** Start an incremental sync. Returns at once; poll syncJob for the outcome. */

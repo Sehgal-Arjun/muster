@@ -343,6 +343,108 @@ waits on it.
 
 ---
 
+## Processes and gather
+
+A process is the thing a pile of documents is *about*. Search answers "find me
+the thing"; these answer "what is the state of the thing".
+
+### `GET /process`
+
+```json
+{ "processes": [ { "slug": "j-1-visa-application", "name": "J-1 visa application",
+                   "created_at": "…", "updated_at": "…",
+                   "anchors": [ { "kind": "domain", "value": "sponsor.example" } ] } ] }
+```
+
+### `POST /process?name=…&accept_top=N`
+
+Creates a process and mines the top search results for recurring identifiers.
+`accept_top` anchors on the N best-evidenced proposals; **every** proposal is
+returned either way, so a caller can present the rest rather than have them
+applied silently.
+
+### `GET /process/{slug}/gather` — the artifact
+
+Versioned, because other features consume it. Open items are one renderer over
+this, not the only one.
+
+```json
+{
+  "version": 1,
+  "process": { "slug": "…", "name": "…" },
+  "anchors": [ { "kind": "domain", "value": "sponsor.example" } ],
+  "doc_ids": [ 5867, 3135, … ],
+  "inclusions": [ { "doc_id": 5867, "reason": "seed_only", "via": null },
+                  { "doc_id": 3135, "reason": "anchor:domain", "via": "sponsor.example" } ],
+  "seed_only": [ 5867 ],
+  "capped": false, "dropped": 0, "depth_reached": 2, "size": 88
+}
+```
+
+`doc_ids` is **chronological by `doc_date`, never by relevance**: state is
+temporal, and relevance ordering destroys the sequence that shows a deposit was
+requested in April and paid in May.
+
+`inclusions` explains every document. `reason` is `anchor:<kind>`, `edge:<name>`
+or `seed_only`. Documents included by the seed alone are also listed under
+`seed_only` — that count is how a missing anchor announces itself.
+
+Expansion follows exact joins only (threads, anchored counterparties,
+attachments, download provenance, reference numbers, folders), so the same
+inputs give the same set every time. Nothing uses similarity.
+
+`dropped` is how many documents the cap discarded, keeping the most recent.
+
+### `GET /process/{slug}`
+
+Timeline, open items, and what could not be accounted for.
+
+```json
+{
+  "process": { … },
+  "gather": { "version": 1, "size": 88, "capped": false, "dropped": 0,
+              "depth_reached": 2, "seed_only": 8 },
+  "open_items": {
+    "version": 1,
+    "counts": { "requests_total": 68, "requests_satisfied": 2, "requests_open": 66,
+                "documents_considered": 88, "documents_unaccounted": 0,
+                "open_without_candidates": 53, "duplicates_collapsed": 13 },
+    "next_deadline": "2025-12-25",
+    "items": [ { "kind": "unsatisfied", "what": "proof of health insurance",
+                 "when": null, "counterparty": "clerk@sponsor.example",
+                 "detail": "no candidate fulfilment in the archive",
+                 "doc_ids": [ 2303, 2308 ] } ],
+    "unaccounted_doc_ids": []
+  },
+  "extraction": { "model_id": "qwen2.5:14b", "version": 1, "pending": 0 },
+  "timeline": [ { "doc_id": 5867, "date": "…", "title": "…", "source": "gmail",
+                  "kind": "message", "counterparty": "…",
+                  "reason": "seed_only", "via": null } ]
+}
+```
+
+Every count is computed. Nothing on this endpoint asks a model how many of
+something there are; the only model judgement in the pipeline is whether one
+named thing satisfies one named request, and that is cached per pair.
+
+`items[].kind` is `deadline_near`, `unsatisfied` or `unanswered`, kept distinct
+because flattening them loses what makes each actionable. Every item cites the
+documents it came from.
+
+Three counts exist to stop the report being confidently wrong:
+
+- `documents_unaccounted` — documents in the set the extractor could not read.
+  Reported, never silently omitted.
+- `open_without_candidates` — open items for which the archive holds *no*
+  plausible fulfilment, as against ones checked and rejected. On a real process
+  this was 53 of 66: those were done through a web portal this index cannot see,
+  and without the distinction the answer reads as "you owe 66 things".
+- `extraction.pending` — documents not yet examined at all.
+
+Anything the model concludes is derived and stays out of search.
+
+---
+
 ## `GET /status`
 
 Same numbers as `muster status`, for the UI's footer and empty state.
