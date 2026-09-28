@@ -516,6 +516,53 @@ useful "why is search bad right now" signal.
 
 ---
 
+## `GET /home`
+
+What is going on, across everything — the panel's resting state, shown instead
+of an empty screen when nothing has been typed.
+
+```json
+{
+  "processes": [
+    {
+      "slug": "warehouse-lease",
+      "name": "Warehouse lease",
+      "documents": 194,
+      "anchors": 3,
+      "open": 12,
+      "settled_by_me": 1,
+      "awaiting_confirmation": 2,
+      "next_deadline": "2026-09-01",
+      "estimated": false,
+      "extraction_pending": 0,
+      "last_activity": "2026-08-08T10:00:07+00:00"
+    }
+  ],
+  "index": {
+    "documents": 11075,
+    "missing": 0,
+    "last_sync": "2026-08-08T10:02:11+00:00",
+    "last_result": "ok",
+    "embedding_ready": true
+  }
+}
+```
+
+Sorted soonest-deadline-first; a process with no deadline falls to the end.
+
+`open` is the number of items the process view would list — after duplicates are
+collapsed and dismissals applied — and not `counts.requests_open`, which is
+larger and answers a different question. Two screens disagreeing about the same
+quantity is worse than one of them being approximate.
+
+Built from cached judgements only, so drawing the panel never waits on an
+inference. A process nobody has opened yet has no cached verdicts, so every
+request counts as open and `estimated` is `true`: the number is an upper bound
+that says so. Opening the process once makes its judgements, and every overview
+afterwards is exact and free.
+
+---
+
 ## Decisions on record
 
 **`sources` counts this result list, not the index.** A list that claims four

@@ -7,6 +7,7 @@ const SEARCH_HINTS: Array<[string, string]> = [
   ["⌘O", "open"],
   ["⇥", "gather"],
   ["⌘P", "processes"],
+  ["⌘H", "home"],
   ["⌘⇧F", "open folder"],
   ["⌘K", "actions"],
   ["⌘1/2/3", "mode"],
@@ -20,6 +21,7 @@ const MAIL_HINTS: Array<[string, string]> = [
   ["↵", "open attachment"],
   ["⌘O", "open in Gmail"],
   ["⌘C", "copy body"],
+  ["⌘H", "home"],
   ["esc", "back"],
 ];
 
@@ -31,6 +33,7 @@ const READING_HINTS: Array<[string, string]> = [
   ["⌘O", "open"],
   ["⌘↵", "reveal in Finder"],
   ["⌘C", "copy body"],
+  ["⌘H", "home"],
   ["esc", "back"],
 ];
 

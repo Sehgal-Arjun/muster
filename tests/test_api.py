@@ -625,3 +625,70 @@ def test_warming_sets_ready_even_when_the_model_cannot_load(cfg, monkeypatch) ->
     )
     api_module._warm_model(cfg)
     assert api_module._model_ready.is_set()
+
+
+# --- /home ----------------------------------------------------------------
+
+
+def test_home_has_the_documented_shape_with_no_processes(client) -> None:
+    body = client.get("/home").json()
+    assert set(body) == {"processes", "index"}
+    assert body["processes"] == []
+    assert set(body["index"]) == {
+        "documents", "missing", "last_sync", "last_result", "embedding_ready",
+    }
+    assert body["index"]["documents"] > 0
+
+
+def test_home_summarises_a_process_without_asking_the_model(client, conn, cfg) -> None:
+    """Opening the panel must not wait on an inference — so a summary that has no
+    cached judgement to read reports an upper bound and says so."""
+    from muster import processes
+
+    made = processes.create(conn, "Warehouse lease")
+    processes.add_anchor(conn, made.id, "domain", "example.com")
+    conn.commit()
+
+    body = client.get("/home").json()
+    summary = next(p for p in body["processes"] if p["slug"] == made.slug)
+    assert set(summary) == {
+        "slug", "name", "documents", "anchors", "open", "settled_by_me",
+        "awaiting_confirmation", "next_deadline", "estimated",
+        "extraction_pending", "last_activity",
+    }
+    assert summary["name"] == "Warehouse lease"
+    assert summary["anchors"] == 1
+    assert summary["documents"] >= 1
+
+
+def test_home_open_count_is_what_the_process_view_would_list(client, conn, cfg) -> None:
+    """Two screens showing different numbers for the same thing is worse than
+    either number being approximate."""
+    from muster import gather as gather_mod, openitems, processes
+
+    made = processes.create(conn, "Warehouse lease")
+    processes.add_anchor(conn, made.id, "domain", "example.com")
+    conn.commit()
+
+    body = client.get("/home").json()
+    summary = next(p for p in body["processes"] if p["slug"] == made.slug)
+
+    process = processes.get(conn, made.slug)
+    report = openitems.compute(
+        conn, gather_mod.gather(conn, process), model=cfg.extract.model_id,
+        process_id=process.id, cached_only=True,
+    )
+    assert summary["open"] == len(report.items)
+
+
+def test_home_orders_by_the_soonest_deadline(client, conn) -> None:
+    from muster import processes
+
+    for name, anchor in (("Later", "example.com"), ("Sooner", "other.example")):
+        made = processes.create(conn, name)
+        processes.add_anchor(conn, made.id, "domain", anchor)
+    conn.commit()
+
+    deadlines = [p["next_deadline"] for p in client.get("/home").json()["processes"]]
+    # None sorts last, whatever the names or sizes happen to be.
+    assert deadlines == sorted(deadlines, key=lambda d: d or "9999")

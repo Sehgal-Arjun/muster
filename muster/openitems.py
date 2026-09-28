@@ -93,6 +93,11 @@ class OpenItem:
 
 
 @dataclass
+class _Uncached(Exception):
+    """A pair the cache cannot answer, raised only in cached_only mode."""
+
+
+@dataclass
 class OpenItemsReport:
     version: int
     process_slug: str
@@ -113,6 +118,9 @@ class OpenItemsReport:
     # Settled by the user rather than by evidence. Kept out of the open list and
     # counted separately, so the header stays true.
     settled_items: list = field(default_factory=list)
+    # True when the report was built from cached judgements alone and some pair
+    # had no cached answer. The open count is then an upper bound, and says so.
+    estimated: bool = False
 
     @property
     def by_kind(self) -> dict[str, list[OpenItem]]:
@@ -141,6 +149,7 @@ class OpenItemsReport:
                     1 for i in self.items if i.needs_confirmation
                 ),
             },
+            "estimated": self.estimated,
             "next_deadline": self.next_deadline,
             "items": [i.as_json() for i in self.items],
             "settled": [i.as_json() for i in self.settled_items],
@@ -278,8 +287,16 @@ def satisfies(
     *,
     model: str,
     ask=None,
+    cached_only: bool = False,
 ) -> tuple[bool, str | None]:
-    """Whether `candidate` satisfies `request`. Cached per pair."""
+    """Whether `candidate` satisfies `request`. Cached per pair.
+
+    ``cached_only`` answers from the cache and never asks. It is what makes a
+    summary of every process affordable: the first look at a process pays for
+    its judgements once, and every overview afterwards is free. An uncached pair
+    reads as unsatisfied, so a summary can overstate what is open — which is why
+    a report built this way says that it did.
+    """
     request_key, candidate_key = _key(request), _key(candidate)
     row = conn.execute(
         "SELECT satisfied, reason FROM satisfaction"
@@ -288,6 +305,9 @@ def satisfies(
     ).fetchone()
     if row is not None:
         return bool(row[0]), row[1]
+
+    if cached_only:
+        raise _Uncached()
 
     if ask is None:
         from muster.extraction import _ask_model as ask  # noqa: PLC0415
@@ -384,6 +404,7 @@ def compute(
     today: date | None = None,
     ask=None,
     process_id: int | None = None,
+    cached_only: bool = False,
 ) -> OpenItemsReport:
     """Open items for a gathered process. A set difference, not a summary."""
     from muster import extraction
@@ -446,6 +467,7 @@ def compute(
     settled_items: list[OpenItem] = []
     requests_total = requests_satisfied = 0
     without_candidates = 0
+    estimated = False
     # The same requirement restated in two documents is one obligation, not two.
     # A checklist repeated in a reminder is the common case.
     seen_requests: dict[str, OpenItem] = {}
@@ -478,7 +500,13 @@ def compute(
             ]
             matched: tuple[int, str, str | None] | None = None
             for other_id, text in rank_candidates(what, later):
-                ok, reason = satisfies(conn, what, text, model=model, ask=ask)
+                try:
+                    ok, reason = satisfies(
+                        conn, what, text, model=model, ask=ask, cached_only=cached_only
+                    )
+                except _Uncached:
+                    estimated = True
+                    continue
                 if ok:
                     matched = (other_id, text, reason)
                     break
@@ -543,10 +571,16 @@ def compute(
                 (other_id, text) for other_id, text in provided
                 if position[other_id] > position[doc_id]
             ]
-            if any(
-                satisfies(conn, what, text, model=model, ask=ask)[0]
-                for _oid, text in rank_candidates(what, later)
-            ):
+            fulfilled = False
+            for _oid, text in rank_candidates(what, later):
+                try:
+                    if satisfies(conn, what, text, model=model, ask=ask,
+                                 cached_only=cached_only)[0]:
+                        fulfilled = True
+                        break
+                except _Uncached:
+                    estimated = True
+            if fulfilled:
                 continue
             if today - doc_date > STALE_AFTER:
                 continue
@@ -620,4 +654,5 @@ def compute(
         open_without_candidates=without_candidates,
         duplicates_collapsed=collapsed,
         settled_items=settled_items,
+        estimated=estimated,
     )

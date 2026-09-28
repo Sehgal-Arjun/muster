@@ -266,6 +266,32 @@ export interface ProcessView {
   timeline: TimelineEntry[];
 }
 
+export interface HomeProcess {
+  slug: string;
+  name: string;
+  documents: number;
+  anchors: number;
+  open: number;
+  settled_by_me: number;
+  awaiting_confirmation: number;
+  next_deadline: string | null;
+  /** True when some judgement was uncached, so `open` is an upper bound. */
+  estimated: boolean;
+  extraction_pending: number;
+  last_activity: string | null;
+}
+
+export interface HomeView {
+  processes: HomeProcess[];
+  index: {
+    documents: number;
+    missing: number;
+    last_sync: string | null;
+    last_result: string | null;
+    embedding_ready: boolean;
+  };
+}
+
 export class ApiError extends Error {
   constructor(
     readonly code: string,
@@ -367,6 +393,7 @@ export const api = {
   doc: (id: number) => get<DocResponse>(`/doc/${id}`),
   folders: (q: string) => get<{ folders: FolderHit[] }>("/folders", { q }),
 
+  home: () => get<HomeView>("/home"),
   processes: () => get<{ processes: ProcessSummary[] }>("/process"),
   process: (slug: string) => get<ProcessView>(`/process/${slug}`),
   /** Candidates for a name. Creates nothing — the accept step is the point. */

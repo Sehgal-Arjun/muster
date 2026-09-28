@@ -15,6 +15,7 @@ import { DocView, type View } from "./components/DocView";
 import { EmptyState } from "./components/EmptyState";
 import { FolderJump } from "./components/FolderJump";
 import { GatherView } from "./components/GatherView";
+import { HomeView } from "./components/HomeView";
 import { ProcessPicker } from "./components/ProcessPicker";
 import { Footer } from "./components/Footer";
 import { ResultRow } from "./components/ResultRow";
@@ -404,6 +405,22 @@ export default function App() {
     setStack([{ kind: "doc", id: hit.doc_id }]);
   }, []);
 
+  /**
+   * Back to the resting state: no query, no process, nothing open.
+   *
+   * Reachable from every screen, because the alternative is pressing Escape an
+   * uncertain number of times and hoping.
+   */
+  const goHome = useCallback(() => {
+    setQuery("");
+    setResponse(null);
+    setStack([]);
+    setGatherSlug(null);
+    setPicking(false);
+    setMode("hybrid");
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
   const back = useCallback(() => {
     setStack((current) => current.slice(0, -1));
   }, []);
@@ -552,6 +569,13 @@ export default function App() {
    */
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "h") {
+        // Bound at the document too: the reader and the picker both stop the
+        // container handler, and "go back to the start" should work anywhere.
+        event.preventDefault();
+        goHome();
+        return;
+      }
       if (event.key !== "Escape") return;
       event.preventDefault();
       // The actions palette owns Escape while it is open: it should close on
@@ -575,7 +599,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onEscape);
     return () => document.removeEventListener("keydown", onEscape);
-  }, [showActions, hide, stack.length, back, gatherSlug, picking]);
+  }, [showActions, hide, stack.length, back, gatherSlug, picking, goHome]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (showActions) return;
@@ -600,6 +624,9 @@ export default function App() {
       // Enter reads it here. Leaving the panel to open Gmail or Preview is the
       // failure this view exists to remove; ⌘↵ still reveals the original.
       void (meta ? reveal(current) : read(current));
+    } else if (meta && event.key.toLowerCase() === "h") {
+      event.preventDefault();
+      goHome();
     } else if (meta && event.key.toLowerCase() === "p") {
       event.preventDefault();
       setPicking(true);
@@ -715,10 +742,7 @@ export default function App() {
         )}
 
         {hits.length === 0 && !response && !error && !searching && (
-          <div className="empty">
-            <div className="empty-headline">Muster</div>
-            <div className="empty-detail dim">Start typing.</div>
-          </div>
+          <HomeView onOpenProcess={(slug) => setGatherSlug(slug)} />
         )}
 
         {error && (

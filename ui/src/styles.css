@@ -583,3 +583,20 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
   color: #ffcf70;
   padding-left: 6px;
 }
+
+/* --- home ---------------------------------------------------------------- */
+
+/* The resting state. Gather answers "what is the state of this thing"; this
+   answers it for all of them, and is what an empty query should show instead of
+   an instruction to start typing. */
+.home-index { font-size: 11.5px; margin-top: 4px; }
+.home-row { align-items: center; }
+.home-docs { flex: none; font-size: 11px; }
+.home-overdue { color: #ff8f8f; }
+.chip.home-open { color: var(--accent); border-color: rgba(127, 156, 255, 0.4); }
+.home-hint {
+  margin-top: 22px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+}

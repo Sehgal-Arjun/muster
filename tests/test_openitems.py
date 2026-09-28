@@ -377,3 +377,70 @@ def test_a_future_deadline_is_not_asked_about(conn, process) -> None:
                         today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
                         process_id=process.id)
     assert all(not i.needs_confirmation for i in report.items)
+
+
+# --- the cached-only mode, which is what makes an overview affordable ------
+
+
+def test_cached_only_never_asks_the_model(conn, process) -> None:
+    """The panel's resting state must not wait on an inference to draw itself."""
+    asked = _mail(conn, uid="ask", title="Please send insurance",
+                  when="2026-04-01T09:00:00+00:00", sender=THEM)
+    _extract(conn, asked, direction="inbound",
+             requests_of_me=[{"what": "proof of insurance", "due": None}])
+    replied = _mail(conn, uid="reply", title="Re: insurance",
+                    when="2026-04-02T09:00:00+00:00", sender=OWN)
+    _extract(conn, replied, direction="outbound",
+             things_i_sent=[{"what": "proof of insurance certificate", "doc_ref": None}])
+
+    def refuse(_prompt, _model):  # pragma: no cover — reaching this is the failure
+        raise AssertionError("cached_only asked the model")
+
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=refuse,
+                        process_id=process.id, cached_only=True)
+    assert report.estimated is True
+    assert report.requests_satisfied == 0
+
+
+def test_an_uncached_pair_counts_as_open_so_the_number_is_an_upper_bound(
+    conn, process
+) -> None:
+    asked = _mail(conn, uid="ask", title="Please send insurance",
+                  when="2026-04-01T09:00:00+00:00", sender=THEM)
+    _extract(conn, asked, direction="inbound",
+             requests_of_me=[{"what": "proof of insurance", "due": None}])
+    replied = _mail(conn, uid="reply", title="Re: insurance",
+                    when="2026-04-02T09:00:00+00:00", sender=OWN)
+    _extract(conn, replied, direction="outbound",
+             things_i_sent=[{"what": "proof of insurance certificate", "doc_ref": None}])
+
+    cached = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": true}',
+                        process_id=process.id, cached_only=True)
+    # Warm the judgement, then ask again with the model forbidden.
+    OI.compute(conn, G.gather(conn, process), model="test-model",
+               today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": true}',
+               process_id=process.id)
+    warm = OI.compute(conn, G.gather(conn, process), model="test-model",
+                      today=date(2026, 5, 1),
+                      ask=lambda _p, _m: (_ for _ in ()).throw(AssertionError("asked")),
+                      process_id=process.id, cached_only=True)
+
+    assert len(cached.items) >= len(warm.items)
+    assert warm.estimated is False
+    assert warm.requests_satisfied == 1
+
+
+def test_nothing_to_judge_is_not_an_estimate(conn, process) -> None:
+    """A report with no pairs to weigh knows its numbers exactly."""
+    asked = _mail(conn, uid="ask", title="Please send insurance",
+                  when="2026-04-01T09:00:00+00:00", sender=THEM)
+    _extract(conn, asked, direction="inbound",
+             requests_of_me=[{"what": "proof of insurance", "due": None}])
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1),
+                        ask=lambda _p, _m: (_ for _ in ()).throw(AssertionError("asked")),
+                        process_id=process.id, cached_only=True)
+    assert report.estimated is False
+    assert [i.kind for i in report.items] == [OI.UNSATISFIED]

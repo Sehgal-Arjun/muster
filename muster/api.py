@@ -596,6 +596,70 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         )
         return {"settled": True, "verdict": verdict, "known_docs": known}
 
+    @app.get("/home")
+    def home(_db: None = Depends(require_db)) -> dict:
+        """What is going on, across everything. The panel's resting state.
+
+        Built from cached judgements only, so opening the panel never waits on a
+        model. A process nobody has opened yet reports its open count as an upper
+        bound and says so, rather than either blocking or quietly guessing.
+        """
+        from muster import extraction
+        from muster import gather as gather_mod
+        from muster import openitems, processes, syncstate
+
+        conn = _connection(cfg)
+        summaries = []
+        for process in processes.all_processes(conn):
+            result = gather_mod.gather(conn, process)
+            report = openitems.compute(
+                conn, result, model=cfg.extract.model_id,
+                process_id=process.id, cached_only=True,
+            )
+            counts = report.as_json()["counts"]
+            summaries.append({
+                "slug": process.slug,
+                "name": process.name,
+                "documents": result.size,
+                "anchors": len(process.anchors),
+                # The number of things you would actually see and act on, after
+                # duplicates are collapsed and dismissals applied — not the raw
+                # request count, which reads higher and means something else.
+                "open": len(report.items),
+                "settled_by_me": counts["settled_by_me"],
+                "awaiting_confirmation": counts["awaiting_confirmation"],
+                "next_deadline": report.next_deadline,
+                # An upper bound rather than a count, when judgements are missing.
+                "estimated": report.estimated,
+                "extraction_pending": len(extraction.pending(conn, result.doc_ids)),
+                "last_activity": max(
+                    (r["doc_date"] for r in _process_rows(conn, result.doc_ids)
+                     if r["doc_date"]),
+                    default=None,
+                ),
+            })
+
+        # Soonest deadline first; processes with none fall to the end.
+        summaries.sort(key=lambda s: (s["next_deadline"] or "9999", -s["open"]))
+
+        state = syncstate.get(conn, "gmail")
+        totals = conn.execute(
+            "SELECT count(*) AS docs,"
+            " sum(CASE WHEN missing_since IS NOT NULL THEN 1 ELSE 0 END) AS missing"
+            " FROM docs WHERE origin = 'captured'"
+        ).fetchone()
+
+        return {
+            "processes": summaries,
+            "index": {
+                "documents": totals["docs"] or 0,
+                "missing": totals["missing"] or 0,
+                "last_sync": state.last_sync if state else None,
+                "last_result": state.last_result if state else None,
+                "embedding_ready": _model_ready.is_set(),
+            },
+        }
+
     @app.get("/folders")
     def folders(
         q: str = Query(..., description="A name, not a sentence."),
