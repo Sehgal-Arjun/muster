@@ -351,3 +351,83 @@ def test_the_hand_started_embed_command_honours_the_pause_switch(
 
     # The command closes its own connection, so the evidence is what it said.
     assert "paused before finishing" in capsys.readouterr().out
+
+
+def test_the_model_loads_once_even_from_many_threads(monkeypatch) -> None:
+    """Three threads once loaded three copies of a 2GB model onto one GPU. The
+    machine spent minutes at 350% CPU and the panel looked hung."""
+    import sys
+    import threading
+    import types
+
+    from muster import embed
+
+    built: list[str] = []
+    ready = threading.Barrier(4)
+
+    class Slow:
+        def __init__(self, model_id, device=None):
+            built.append(model_id)
+            # Long enough that an unlocked check-then-set would certainly race.
+            threading.Event().wait(0.2)
+
+    fake = types.ModuleType("sentence_transformers")
+    fake.SentenceTransformer = Slow
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+    monkeypatch.setattr(embed, "_model_cache", {})
+    monkeypatch.setattr(embed, "resolve_device", lambda _p=None: "cpu")
+
+    def load() -> None:
+        ready.wait()
+        embed.load_model("some/model")
+
+    threads = [threading.Thread(target=load) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    ready.wait()
+    for thread in threads:
+        thread.join()
+
+    assert built == ["some/model"]
+
+
+def test_encoding_never_overlaps_itself(monkeypatch) -> None:
+    """Two threads in the MPS backend at once crashed the process inside
+    mps_copy_. There is one GPU; overlapping was never faster, only unsafe."""
+    import threading
+
+    from muster import embed
+
+    inside = 0
+    overlapped = False
+    guard = threading.Lock()
+    ready = threading.Barrier(4)
+
+    class Model:
+        def encode(self, _texts, **_kwargs):
+            nonlocal inside, overlapped
+            with guard:
+                inside += 1
+                overlapped = overlapped or inside > 1
+            threading.Event().wait(0.05)
+            with guard:
+                inside -= 1
+            return [[0.0]]
+
+    model = Model()
+
+    def work(index: int) -> None:
+        ready.wait()
+        if index % 2:
+            embed.encode_query(model, "a query", "test/model")
+        else:
+            embed.encode_documents(model, ["a document"], model_id="test/model")
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(3)]
+    for thread in threads:
+        thread.start()
+    ready.wait()
+    for thread in threads:
+        thread.join()
+
+    assert not overlapped

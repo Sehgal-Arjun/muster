@@ -194,6 +194,30 @@ def test_unextracted_documents_are_reported_not_hidden(conn, process) -> None:
     assert report.documents_unaccounted, "an unextracted document vanished from the count"
 
 
+def test_a_document_nobody_read_is_not_reported_as_unreadable(conn, process) -> None:
+    """The panel said "194 documents could not be read" about 194 documents nothing
+    had tried to read yet. Two different problems, so two different counts."""
+    _mail(conn, uid="unread", title="Please send insurance",
+          when="2026-04-01T09:00:00+00:00", sender=THEM)
+    report = _report(conn, process)
+    counts = report.as_json()["counts"]
+    assert counts["documents_unexamined"] >= 1
+    assert counts["documents_unread"] == 0
+
+
+def test_a_recorded_failure_is_reported_as_unreadable(conn, process) -> None:
+    doc_id = _mail(conn, uid="broken", title="attachment only",
+                   when="2026-04-01T09:00:00+00:00", sender=THEM)
+    extraction.record_failure(conn, doc_id, "no text", attempts=1)
+    conn.commit()
+    report = _report(conn, process)
+    counts = report.as_json()["counts"]
+    assert counts["documents_unread"] == 1
+    assert doc_id not in report.documents_unexamined
+    # Still accounted for, in the total that means "contributing nothing above".
+    assert doc_id in report.documents_unaccounted
+
+
 def test_the_report_is_deterministic(conn, process) -> None:
     asked = _mail(conn, uid="ask", title="send it", when="2026-04-01T09:00:00+00:00", sender=THEM)
     _extract(conn, asked, direction="inbound",

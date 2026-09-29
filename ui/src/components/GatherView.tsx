@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ApiError, api, type OpenItem, type ProcessView } from "../api";
+import { ApiError, api, type ExtractJob, type OpenItem, type ProcessView } from "../api";
 
 /**
  * Gather mode: the state of a process rather than a list of matches.
@@ -43,6 +43,7 @@ export function GatherView({
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   const [flash, setFlash] = useState<string | null>(null);
+  const [job, setJob] = useState<ExtractJob | null>(null);
 
   /**
    * Settle an item by hand.
@@ -65,6 +66,56 @@ export function GatherView({
     [slug],
   );
 
+  /**
+   * Read the documents nobody has read yet.
+   *
+   * The header is only true about documents that have been examined, and until
+   * this runs the honest answer to "how many are open" is "unknown". Telling
+   * someone to open a terminal to make the screen in front of them true is worse
+   * than letting the screen start the work.
+   */
+  const examine = useCallback(async () => {
+    if (!slug || job?.state === "running") return;
+    try {
+      setJob(await api.extract(slug));
+    } catch (cause) {
+      setFlash(cause instanceof ApiError ? cause.message : String(cause));
+    }
+  }, [slug, job]);
+
+  // Polled rather than streamed: a progress number that is two seconds stale
+  // costs nothing, and a websocket for it would be a second transport to keep
+  // working.
+  useEffect(() => {
+    if (!job?.job || job.state !== "running") return;
+    let live = true;
+    const timer = setInterval(async () => {
+      try {
+        const next = await api.extractJob(job.job as string);
+        if (!live) return;
+        setJob(next);
+        if (next.state !== "running") {
+          clearInterval(timer);
+          // The numbers on this screen were computed from an unread set. They
+          // are wrong now in the good direction, so fetch them again.
+          if (slug) setView(await api.process(slug));
+          setFlash(
+            next.state === "failed"
+              ? `Extraction failed: ${next.error ?? "unknown"}`
+              : `Examined ${next.extracted} document${next.extracted === 1 ? "" : "s"}` +
+                (next.failed ? `, ${next.failed} unreadable` : ""),
+          );
+        }
+      } catch {
+        clearInterval(timer);  // server gone; the flash on the next action says so
+      }
+    }, 2000);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [job, slug]);
+
   useEffect(() => {
     if (!flash) return;
     const timer = setTimeout(() => setFlash(null), 2200);
@@ -75,6 +126,14 @@ export function GatherView({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (!view) return;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "e") {
+        // Bound whether or not there are open items: a process with nothing
+        // examined has no open items *and* nothing to show, which is exactly
+        // when this is needed.
+        event.preventDefault();
+        void examine();
+        return;
+      }
       const open = view.open_items.items;
       if (!open.length) return;
       if (event.key === "ArrowDown" || event.key === "j") {
@@ -91,7 +150,7 @@ export function GatherView({
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [view, selected, settle]);
+  }, [view, selected, settle, examine]);
 
   useEffect(() => {
     let live = true;
@@ -140,6 +199,13 @@ export function GatherView({
   const counts = view.open_items.counts;
   const items = view.open_items.items;
   const settledItems = view.open_items.settled ?? [];
+  // Nothing examined means nothing computed. A bold "0 open" over a set the
+  // extractor has never touched reads as "you are clear", which is the one thing
+  // this screen must never say by accident.
+  const unexamined = counts.documents_unexamined ?? view.extraction.pending;
+  const blind = unexamined >= view.gather.size && view.gather.size > 0;
+  const partial = unexamined > 0 && !blind;
+
   const grouped = KIND_ORDER.map((kind) => ({
     kind,
     items: items.filter((i) => i.kind === kind),
@@ -153,10 +219,15 @@ export function GatherView({
         {/* Every figure here is a query result. */}
         <div className="gather-counts">
           <Stat
-            value={`${counts.requests_satisfied}/${counts.requests_total}`}
+            value={blind ? "—" : `${counts.requests_satisfied}/${counts.requests_total}`}
             label="requests met"
           />
-          <Stat value={String(counts.requests_open)} label="open" />
+          <Stat
+            // A "+" where documents remain unread: what is known to be open,
+            // which can only grow once the rest are examined.
+            value={blind ? "—" : `${counts.requests_open}${partial ? "+" : ""}`}
+            label={blind ? "not examined" : "open"}
+          />
           <Stat
             value={view.open_items.next_deadline ? shortDate(view.open_items.next_deadline) : "—"}
             label="next deadline"
@@ -173,17 +244,33 @@ export function GatherView({
               somewhere this index cannot see.
             </div>
           )}
-          {counts.documents_unaccounted > 0 && (
+          {counts.documents_unread > 0 && (
             <div className="caveat warn">
-              {counts.documents_unaccounted} document
-              {counts.documents_unaccounted > 1 ? "s" : ""} could not be read, and are
-              not represented above.
+              {counts.documents_unread} document
+              {counts.documents_unread > 1 ? "s" : ""} could not be read, and are not
+              represented above.
             </div>
           )}
-          {view.extraction.pending > 0 && (
+          {unexamined > 0 && (
             <div className="caveat warn">
-              {view.extraction.pending} document{view.extraction.pending > 1 ? "s" : ""} not
-              yet examined — run <code>muster process extract {view.process.slug}</code>.
+              {blind
+                ? `Nothing here has been examined yet — the figures above are unknown, not zero.`
+                : `${unexamined} of ${view.gather.size} documents not examined yet, so the figures above are a floor.`}{" "}
+              {job?.state === "running" ? (
+                <span className="caveat-run">
+                  Examining {job.done}/{job.total}…{" "}
+                  <button
+                    className="caveat-action"
+                    onClick={() => job.job && void api.stopExtract(job.job)}
+                  >
+                    stop
+                  </button>
+                </span>
+              ) : (
+                <button className="caveat-action" onClick={() => void examine()}>
+                  examine now (⌘E)
+                </button>
+              )}
             </div>
           )}
           {view.gather.seed_only > 0 && (

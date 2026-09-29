@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import struct
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -54,6 +55,15 @@ def prefixes_for(model_id: str) -> tuple[str, str]:
 
 DEFAULT_BATCH = 64
 _model_cache: dict[tuple[str, str | None], object] = {}
+# Guards filling the cache, not reading it. See load_model.
+_load_lock = threading.Lock()
+
+# One inference at a time. PyTorch's MPS backend is not safe to use from several
+# threads at once: driving it concurrently crashed the server inside
+# mps_copy_ -> malloc with SIGTRAP, twice, and hung every request in between.
+# There is one GPU, so serialising costs nothing that was real — two encodes on
+# one device do not go faster for overlapping, they only corrupt each other.
+_infer_lock = threading.Lock()
 
 
 def pack(vector) -> bytes:
@@ -80,10 +90,24 @@ def resolve_device(preference: str | None = None) -> str:
 
 
 def load_model(model_id: str, device: str | None = None):
-    """Load and cache. Loading bge-small twice in one process is pure waste."""
+    """Load and cache. Loading bge-m3 twice in one process is pure waste.
+
+    Locked, because the cache alone is not enough in the server: the startup
+    warm-up runs on one thread and requests arrive on others, and a plain
+    check-then-set had three copies of a 2GB model loading onto the same GPU at
+    once. Everything then took minutes and looked like a hang. The second caller
+    waits for the first instead — which is what it wanted anyway.
+    """
     device = resolve_device(device)
     key = (model_id, device)
-    if key not in _model_cache:
+    cached = _model_cache.get(key)
+    if cached is not None:
+        return cached
+    with _load_lock:
+        # Checked again inside: whoever held the lock may have been loading this.
+        cached = _model_cache.get(key)
+        if cached is not None:
+            return cached
         from sentence_transformers import SentenceTransformer
 
         log.info("loading %s on %s", model_id, device)
@@ -97,23 +121,28 @@ def encode_documents(
     _query_prefix, doc_prefix = prefixes_for(model_id)
     if doc_prefix:
         texts = [doc_prefix + text for text in texts]
-    return model.encode(
-        texts,
-        batch_size=batch_size,
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-    )
+    with _infer_lock:
+        return model.encode(
+            texts,
+            batch_size=batch_size,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
 
 
 def encode_query(model, query: str, model_id: str = ""):
     query_prefix, _doc_prefix = prefixes_for(model_id)
-    return model.encode(
-        query_prefix + query,
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-    )
+    # Serialised for the same reason as encode_documents: the server encodes
+    # queries from request threads, and one of them overlapping the startup
+    # warm-up is what took the process down.
+    with _infer_lock:
+        return model.encode(
+            query_prefix + query,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
 
 
 # --- work discovery -------------------------------------------------------

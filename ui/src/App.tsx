@@ -764,6 +764,7 @@ export default function App() {
           error={error}
           reading={reading}
           readingMail={openDoc?.mime === "message/rfc822"}
+          gathering={gatherSlug !== null}
           syncing={syncing}
         />
 

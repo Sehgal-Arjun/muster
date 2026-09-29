@@ -254,6 +254,9 @@ export interface ProcessView {
       awaiting_confirmation: number;
       documents_considered: number;
       documents_unaccounted: number;
+      /** Read and not understood, versus not looked at yet. Different problems. */
+      documents_unread: number;
+      documents_unexamined: number;
       open_without_candidates: number;
       duplicates_collapsed: number;
     };
@@ -290,6 +293,18 @@ export interface HomeView {
     last_result: string | null;
     embedding_ready: boolean;
   };
+}
+
+export interface ExtractJob {
+  job: string | null;
+  process: string;
+  state: "running" | "done" | "stopped" | "failed";
+  done: number;
+  total: number;
+  extracted: number;
+  failed: number;
+  error: string | null;
+  started?: boolean;
 }
 
 export class ApiError extends Error {
@@ -394,6 +409,10 @@ export const api = {
   folders: (q: string) => get<{ folders: FolderHit[] }>("/folders", { q }),
 
   home: () => get<HomeView>("/home"),
+  extract: (slug: string) => post<ExtractJob>(`/process/${encodeURIComponent(slug)}/extract`),
+  extractJob: (job: string) => get<ExtractJob>(`/process/extract/${encodeURIComponent(job)}`),
+  stopExtract: (job: string) =>
+    post<ExtractJob>(`/process/extract/${encodeURIComponent(job)}/stop`),
   processes: () => get<{ processes: ProcessSummary[] }>("/process"),
   process: (slug: string) => get<ProcessView>(`/process/${slug}`),
   /** Candidates for a name. Creates nothing — the accept step is the point. */

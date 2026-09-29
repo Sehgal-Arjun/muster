@@ -692,3 +692,102 @@ def test_home_orders_by_the_soonest_deadline(client, conn) -> None:
     deadlines = [p["next_deadline"] for p in client.get("/home").json()["processes"]]
     # None sorts last, whatever the names or sizes happen to be.
     assert deadlines == sorted(deadlines, key=lambda d: d or "9999")
+
+
+# --- POST /process/{slug}/extract -----------------------------------------
+
+
+def test_extract_starts_a_job_and_reports_progress(client, conn, monkeypatch) -> None:
+    """The screen tells you figures are unknown until documents are read. It must
+    then be able to read them, rather than telling you to open a terminal."""
+    from muster import api as api_mod, processes
+
+    made = processes.create(conn, "Warehouse lease")
+    processes.add_anchor(conn, made.id, "domain", "example.com")
+    conn.commit()
+
+    seen: dict = {}
+
+    def fake_extract_set(_conn, doc_ids, **kwargs):
+        seen["docs"] = list(doc_ids)
+        kwargs["progress"](1, len(doc_ids), doc_ids[0])
+        return len(doc_ids), 0
+
+    monkeypatch.setattr("muster.extraction.extract_set", fake_extract_set)
+
+    body = client.post(f"/process/{made.slug}/extract").json()
+    assert body["started"] is True
+    assert body["total"] > 0
+    assert body["state"] in {"running", "done"}
+
+    # TestClient runs background tasks before returning from the request that
+    # scheduled them, so by now the job has finished.
+    job = client.get(f"/process/extract/{body['job']}").json()
+    assert job["state"] == "done"
+    assert job["extracted"] == len(seen["docs"])
+    assert job["error"] is None
+    api_mod._extract_jobs.clear()
+
+
+def test_extract_with_nothing_pending_starts_nothing(client, conn, monkeypatch) -> None:
+    from muster import api as api_mod, processes
+
+    # A name nothing in the archive matches, so the gathered set is empty and
+    # there is genuinely nothing pending.
+    made = processes.create(conn, "Zzqqxv unmatched")
+    processes.add_anchor(conn, made.id, "domain", "nobody.invalid")
+    conn.commit()
+
+    def explode(*_a, **_k):  # pragma: no cover — reaching this is the failure
+        raise AssertionError("started an extraction with nothing to extract")
+
+    monkeypatch.setattr("muster.extraction.extract_set", explode)
+    body = client.post(f"/process/{made.slug}/extract").json()
+    assert body["started"] is False
+    assert body["job"] is None
+    api_mod._extract_jobs.clear()
+
+
+def test_a_second_extraction_gets_the_one_already_running(client, conn) -> None:
+    """One model, one process. A queue behind it would only mean two waits."""
+    from muster import api as api_mod, processes
+
+    made = processes.create(conn, "Warehouse lease")
+    processes.add_anchor(conn, made.id, "domain", "example.com")
+    conn.commit()
+    api_mod._extract_jobs["extract-live"] = {
+        "id": "extract-live", "process": "other", "state": "running",
+        "done": 3, "total": 10, "extracted": 3, "failed": 0,
+        "error": None, "stopping": False,
+    }
+    try:
+        body = client.post(f"/process/{made.slug}/extract").json()
+        assert body["started"] is False
+        assert body["job"] == "extract-live"
+        assert body["done"] == 3
+        # The stop flag is internal and must not leak into the response.
+        assert "stopping" not in body
+    finally:
+        api_mod._extract_jobs.clear()
+
+
+def test_stopping_a_job_asks_rather_than_kills(client) -> None:
+    from muster import api as api_mod
+
+    api_mod._extract_jobs["extract-live"] = {
+        "id": "extract-live", "process": "p", "state": "running",
+        "done": 1, "total": 9, "extracted": 1, "failed": 0,
+        "error": None, "stopping": False,
+    }
+    try:
+        body = client.post("/process/extract/extract-live/stop").json()
+        # Still running: it stops after the document in flight, so nothing
+        # already read is lost.
+        assert body["state"] == "running"
+        assert api_mod._extract_jobs["extract-live"]["stopping"] is True
+    finally:
+        api_mod._extract_jobs.clear()
+
+
+def test_an_unknown_extract_job_is_404(client) -> None:
+    assert client.get("/process/extract/nope").status_code == 404

@@ -54,6 +54,12 @@ _local = threading.local()
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 
+# Extraction jobs, kept apart from sync jobs so "is a sync running" stays a
+# question about syncs. One at a time: the model is one process, and two runs
+# would race for it while doing the same work twice.
+_extract_jobs: dict[str, dict] = {}
+_extract_lock = threading.Lock()
+
 # Whether the embedding model is resident. The first vector query otherwise
 # pays ~25s to load bge-m3, during which the panel has nothing to show and looks
 # exactly like a search that found nothing.
@@ -112,6 +118,62 @@ def _run_sync_job(cfg: Config, job_id: str) -> None:
 
     with _jobs_lock:
         _jobs[job_id].update(state=state, result=result, error=error)
+
+
+def _run_extract_job(cfg: Config, job_id: str, slug: str) -> None:
+    """Examine a process's unread documents on a worker thread.
+
+    Long — minutes to an hour — and resumable, because extract_set skips what is
+    already recorded. Stopping it therefore loses nothing but the document in
+    flight, which is why stopping is offered at all.
+    """
+    from muster import extraction, gather as gather_mod, processes
+
+    conn = None
+    state, error = "done", None
+    try:
+        conn = db.connect(cfg.db_path)
+        process = processes.get(conn, slug)
+        if process is None:
+            raise ValueError(f"no process {slug!r}")
+        doc_ids = list(gather_mod.gather(conn, process).doc_ids)
+        owner = ", ".join(sorted(processes.own_addresses_from_archive(conn))) or "the recipient"
+
+        def progress(done: int, total: int, _doc_id: int) -> None:
+            with _extract_lock:
+                _extract_jobs[job_id].update(done=done, total=total)
+
+        def should_stop() -> bool:
+            with _extract_lock:
+                return _extract_jobs[job_id].get("stopping", False)
+
+        extracted, failed = extraction.extract_set(
+            conn, doc_ids, model=cfg.extract.model_id, owner=owner,
+            progress=progress, should_stop=should_stop,
+        )
+        with _extract_lock:
+            if _extract_jobs[job_id].get("stopping"):
+                state = "stopped"
+            _extract_jobs[job_id].update(extracted=extracted, failed=failed)
+    except Exception as exc:  # noqa: BLE001 — surfaced to the caller, not raised
+        log.exception("extract job %s failed", job_id)
+        state, error = "failed", str(exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+    with _extract_lock:
+        _extract_jobs[job_id].update(state=state, error=error)
+
+
+def _job_view(job: dict) -> dict:
+    """What a caller may see of an extraction job. Never the stop flag."""
+    return {
+        "job": job["id"], "process": job["process"], "state": job["state"],
+        "done": job["done"], "total": job["total"],
+        "extracted": job["extracted"], "failed": job["failed"],
+        "error": job["error"],
+    }
 
 
 class ApiError(Exception):
@@ -595,6 +657,68 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             note=body.get("note"), known_docs=known,
         )
         return {"settled": True, "verdict": verdict, "known_docs": known}
+
+    @app.post("/process/{slug}/extract")
+    def process_extract(slug: str, background: BackgroundTasks,
+                        _db: None = Depends(require_db)) -> dict:
+        """Read the documents in a process that have not been read yet.
+
+        The second write this API has, and admitted as an exception to the rule
+        that slow work stays on the command line. The rule exists because a
+        button should not silently start something that destroys work or runs for
+        hours; this destroys nothing, is bounded by the size of one process, and
+        resumes exactly where it stopped. Telling someone to open a terminal to
+        make the screen in front of them true is the worse failure.
+        """
+        from muster import extraction, gather as gather_mod, processes
+
+        conn = _connection(cfg)
+        process = processes.get(conn, slug)
+        if process is None:
+            raise ApiError(404, "not_found", f"No process {slug!r}.")
+        pending = extraction.pending(conn, list(gather_mod.gather(conn, process).doc_ids))
+
+        with _extract_lock:
+            running = next(
+                (j for j in _extract_jobs.values() if j["state"] == "running"), None
+            )
+            if running:
+                # Hand back what is already in flight rather than queueing behind
+                # it — including when it is a different process, since there is
+                # one model and it is busy.
+                return {**_job_view(running), "started": False}
+            if not pending:
+                return {"job": None, "state": "done", "done": 0, "total": 0,
+                        "process": slug, "started": False, "error": None,
+                        "extracted": 0, "failed": 0}
+            job_id = f"extract-{len(_extract_jobs) + 1}-{int(time.time())}"
+            _extract_jobs[job_id] = {
+                "id": job_id, "process": slug, "state": "running",
+                "done": 0, "total": len(pending), "extracted": 0, "failed": 0,
+                "error": None, "stopping": False,
+            }
+        background.add_task(_run_extract_job, cfg, job_id, slug)
+        with _extract_lock:
+            return {**_job_view(_extract_jobs[job_id]), "started": True}
+
+    @app.get("/process/extract/{job_id}")
+    def process_extract_job(job_id: str) -> dict:
+        with _extract_lock:
+            job = _extract_jobs.get(job_id)
+            if job is None:
+                raise ApiError(404, "not_found", f"No extract job {job_id}.")
+            return _job_view(job)
+
+    @app.post("/process/extract/{job_id}/stop")
+    def process_extract_stop(job_id: str) -> dict:
+        """Ask it to stop after the document in flight. Nothing already read is lost."""
+        with _extract_lock:
+            job = _extract_jobs.get(job_id)
+            if job is None:
+                raise ApiError(404, "not_found", f"No extract job {job_id}.")
+            if job["state"] == "running":
+                job["stopping"] = True
+            return _job_view(job)
 
     @app.get("/home")
     def home(_db: None = Depends(require_db)) -> dict:

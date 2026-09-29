@@ -28,6 +28,10 @@ function overdue(iso: string | null): boolean {
 export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => void }) {
   const [home, setHome] = useState<Home | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Only after a beat: a warm answer arrives in ~2s and a flash of "working"
+  // before it would be worse than nothing. A cold server has to load the
+  // embedding model first, and that is the wait worth naming.
+  const [slow, setSlow] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -37,8 +41,10 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
       .catch((cause) =>
         live && setError(cause instanceof ApiError ? cause.message : String(cause)),
       );
+    const beat = setTimeout(() => live && setSlow(true), 1500);
     return () => {
       live = false;
+      clearTimeout(beat);
     };
   }, []);
 
@@ -56,7 +62,9 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
     return (
       <div className="empty">
         <div className="empty-headline">Muster</div>
-        <div className="empty-detail dim">Start typing.</div>
+        <div className="empty-detail dim">
+          {slow ? "Working out where things stand…" : "Start typing."}
+        </div>
       </div>
     );
   }

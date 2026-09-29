@@ -106,7 +106,12 @@ class OpenItemsReport:
     requests_total: int = 0
     requests_satisfied: int = 0
     documents_considered: int = 0
-    documents_unaccounted: list[int] = field(default_factory=list)
+    # Two different things, kept apart because one is a failure and the other is
+    # only unfinished work. Reporting them as one number meant the panel saying
+    # "194 documents could not be read" about 194 documents nothing had tried to
+    # read yet — a broken index, in a screen whose whole job is being trustworthy.
+    documents_unread: list[int] = field(default_factory=list)
+    documents_unexamined: list[int] = field(default_factory=list)
     next_deadline: str | None = None
     # Open items for which the archive holds no plausible fulfilment at all, as
     # opposed to ones where a candidate was considered and rejected. The
@@ -121,6 +126,11 @@ class OpenItemsReport:
     # True when the report was built from cached judgements alone and some pair
     # had no cached answer. The open count is then an upper bound, and says so.
     estimated: bool = False
+
+    @property
+    def documents_unaccounted(self) -> list[int]:
+        """Everything contributing nothing to the numbers above, for either reason."""
+        return self.documents_unexamined + self.documents_unread
 
     @property
     def by_kind(self) -> dict[str, list[OpenItem]]:
@@ -139,6 +149,9 @@ class OpenItemsReport:
                 "requests_open": self.requests_total - self.requests_satisfied,
                 "documents_considered": self.documents_considered,
                 "documents_unaccounted": len(self.documents_unaccounted),
+                # Attempted and failed, versus never attempted.
+                "documents_unread": len(self.documents_unread),
+                "documents_unexamined": len(self.documents_unexamined),
                 "open_without_candidates": self.open_without_candidates,
                 "duplicates_collapsed": self.duplicates_collapsed,
                 "settled_by_me": len(self.settled_items),
@@ -424,11 +437,12 @@ def compute(
         conn, doc_ids, own_addresses_from_archive(conn)
     )
 
-    # Documents with neither an extraction nor a recorded failure are simply not
-    # accounted for, and that is reported rather than hidden.
-    unaccounted = sorted(
-        set(doc_ids) - set(extractions) - set(failed)
-    ) + sorted(failed)
+    # Neither kind is hidden, and they are not the same kind. A document with a
+    # recorded failure was read and could not be understood; one with nothing
+    # recorded has simply not been looked at yet, and will be the moment
+    # extraction runs.
+    unexamined = sorted(set(doc_ids) - set(extractions) - set(failed))
+    unread = sorted(failed)
 
     rows = {
         r["id"]: r
@@ -649,7 +663,8 @@ def compute(
         requests_total=requests_total,
         requests_satisfied=requests_satisfied,
         documents_considered=len(extractions),
-        documents_unaccounted=unaccounted,
+        documents_unread=unread,
+        documents_unexamined=unexamined,
         next_deadline=deadlines[0] if deadlines else None,
         open_without_candidates=without_candidates,
         duplicates_collapsed=collapsed,

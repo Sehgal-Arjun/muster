@@ -37,12 +37,25 @@ const READING_HINTS: Array<[string, string]> = [
   ["esc", "back"],
 ];
 
+// Gather is not a result list: ⇥ is spent, and the keys that matter are the ones
+// that change the process rather than move through it.
+const GATHER_HINTS: Array<[string, string]> = [
+  ["↑↓ jk", "navigate"],
+  ["↵", "read"],
+  ["⌘D", "mark done"],
+  ["⌘E", "examine unread"],
+  ["⌘P", "processes"],
+  ["⌘H", "home"],
+  ["esc", "back"],
+];
+
 export function Footer({
   response,
   mode,
   error,
   reading,
   readingMail,
+  gathering,
   syncing,
 }: {
   response: SearchResponse | null;
@@ -51,12 +64,21 @@ export function Footer({
   reading: boolean;
   /** Mail has no file to reveal, so ⌘↵ means something else over a message. */
   readingMail?: boolean;
+  /** Gather has its own verbs; the search hints would be wrong here. */
+  gathering?: boolean;
   syncing: boolean;
 }) {
   return (
     <footer className="footer">
       <div className="hints">
-        {(reading ? (readingMail ? MAIL_HINTS : READING_HINTS) : SEARCH_HINTS).map(([key, label]) => (
+        {(reading
+          ? readingMail
+            ? MAIL_HINTS
+            : READING_HINTS
+          : gathering
+            ? GATHER_HINTS
+            : SEARCH_HINTS
+        ).map(([key, label]) => (
           <span key={key} className="hint">
             <kbd>{key}</kbd>
             {label}

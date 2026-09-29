@@ -446,7 +446,7 @@ def process_extract(
         if failed:
             typer.echo(
                 f"  {failed} document(s) could not be read and are recorded as"
-                " unaccounted for rather than dropped"
+                " such rather than dropped"
             )
     finally:
         conn.close()
