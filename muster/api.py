@@ -60,6 +60,15 @@ _jobs_lock = threading.Lock()
 _extract_jobs: dict[str, dict] = {}
 _extract_lock = threading.Lock()
 
+# Reconstructed process views, keyed by slug. The home page computes exactly what
+# a click needs and used to throw it away, so opening a process re-ran the gather
+# the overview had just finished — the same two seconds, twice, and the second one
+# with somebody watching. Kept in memory rather than a table: it is derived from
+# things that are already durable, and a restart's first rebuild is what the
+# warm-up thread is for.
+_views: dict[str, dict] = {}
+_views_lock = threading.Lock()
+
 # Whether the embedding model is resident. The first vector query otherwise
 # pays ~25s to load bge-m3, during which the panel has nothing to show and looks
 # exactly like a search that found nothing.
@@ -88,6 +97,10 @@ def _warm_model(cfg: Config) -> None:
         # Set either way: waiting on a load that failed helps nobody, and
         # keyword search does not need it.
         _model_ready.set()
+
+    # Then reconstruct the processes, on this same thread. A gather needs the
+    # model, and this is the one thread allowed to use it during startup.
+    _warm_views(cfg)
 
 
 def _run_sync_job(cfg: Config, job_id: str) -> None:
@@ -118,6 +131,11 @@ def _run_sync_job(cfg: Config, job_id: str) -> None:
 
     with _jobs_lock:
         _jobs[job_id].update(state=state, result=result, error=error)
+
+    # New mail invalidates every view. Rebuild now rather than on the next
+    # summon, which is when somebody is waiting.
+    if state == "done":
+        _warm_views(cfg)
 
 
 def _run_extract_job(cfg: Config, job_id: str, slug: str) -> None:
@@ -164,6 +182,152 @@ def _run_extract_job(cfg: Config, job_id: str, slug: str) -> None:
 
     with _extract_lock:
         _extract_jobs[job_id].update(state=state, error=error)
+
+    # Newly read documents change what is outstanding, which is the whole point
+    # of having read them.
+    if state in ("done", "stopped"):
+        _warm_views(cfg)
+
+
+def _build_process_view(cfg: Config, conn: sqlite3.Connection, process, *,
+                        cached_only: bool = False) -> dict:
+    """Reconstruct a process from the archive. The expensive one, called once.
+
+    Everything a caller could want about a process, in one payload, because the
+    overview and the detail screen must never be able to disagree about a number
+    — they are now literally the same object.
+    """
+    from muster import extraction
+    from muster import gather as gather_mod
+    from muster import openitems
+
+    result = gather_mod.gather(conn, process)
+    report = openitems.compute(
+        conn, result, model=cfg.extract.model_id, process_id=process.id,
+        cached_only=cached_only,
+    )
+
+    rows = {r["id"]: r for r in _process_rows(conn, result.doc_ids)}
+    timeline = [
+        {
+            "doc_id": doc_id,
+            "date": rows[doc_id]["doc_date"] if doc_id in rows else None,
+            "title": rows[doc_id]["title"] if doc_id in rows else None,
+            "source": rows[doc_id]["source"] if doc_id in rows else None,
+            "kind": _kind(
+                rows[doc_id]["mime"] if doc_id in rows else None,
+                rows[doc_id]["source_uid"] if doc_id in rows else "",
+            ),
+            "counterparty": rows[doc_id]["counterparty"] if doc_id in rows else None,
+            # Why this document is here. Never omitted.
+            "reason": result.inclusions[doc_id].reason,
+            "via": result.inclusions[doc_id].via,
+        }
+        for doc_id in result.doc_ids
+    ]
+
+    pending = extraction.pending(conn, result.doc_ids)
+
+    return {
+        "process": {
+            "slug": process.slug, "name": process.name,
+            "anchors": [{"kind": a.kind, "value": a.value} for a in process.anchors],
+        },
+        "gather": {
+            "version": result.version,
+            "size": result.size,
+            "capped": result.capped,
+            "dropped": result.dropped,
+            "depth_reached": result.depth_reached,
+            # Documents the seed found that no anchor explains: the count
+            # that says an anchor is probably missing.
+            "seed_only": len(result.seed_only),
+        },
+        "open_items": report.as_json(),
+        "extraction": {
+            "model_id": cfg.extract.model_id,
+            "version": extraction.EXTRACTOR_VERSION,
+            "pending": len(pending),
+        },
+        "timeline": timeline,
+    }
+
+
+def _view_key(conn: sqlite3.Connection, process) -> str:
+    """Everything that can change a process view, cheaply.
+
+    Deliberately coarse: any new document or extraction anywhere invalidates
+    every process. Recomputing one view costs about two seconds and being wrong
+    about what is outstanding costs trust, so the trade is not close.
+
+    Note what is *not* in here: the satisfaction verdicts. Building a full view
+    writes them, so including them would invalidate the entry the build just
+    stored and recompute forever.
+    """
+    from muster import extraction
+
+    docs = conn.execute("SELECT count(*), coalesce(max(id), 0) FROM docs").fetchone()
+    anchors = conn.execute(
+        "SELECT count(*), coalesce(max(id), 0) FROM process_anchors WHERE process_id = ?",
+        (process.id,),
+    ).fetchone()
+    extracted = conn.execute(
+        "SELECT count(*) FROM doc_extractions WHERE extractor_version = ?",
+        (extraction.EXTRACTOR_VERSION,),
+    ).fetchone()[0]
+    dismissed = conn.execute(
+        "SELECT count(*) FROM item_dismissals WHERE process_id = ?", (process.id,)
+    ).fetchone()[0]
+    return "|".join(str(x) for x in (
+        docs[0], docs[1], anchors[0], anchors[1], extracted, dismissed,
+        extraction.EXTRACTOR_VERSION,
+    ))
+
+
+def _process_view(cfg: Config, conn: sqlite3.Connection, process, *,
+                  cached_only: bool = False) -> dict:
+    """A process view, computed once and shared by everything that needs one.
+
+    A view built with ``cached_only`` may be partial — some pair had no cached
+    verdict, so its open count is an upper bound. That is fine for an overview
+    and not fine for the screen you opened, so a caller wanting the real thing
+    rebuilds it and the exact answer replaces the estimate for everyone.
+    """
+    key = _view_key(conn, process)
+    with _views_lock:
+        cached = _views.get(process.slug)
+        if cached and cached["key"] == key and (cached_only or not cached["partial"]):
+            return cached["payload"]
+
+    payload = _build_process_view(cfg, conn, process, cached_only=cached_only)
+    with _views_lock:
+        _views[process.slug] = {
+            "key": key,
+            "payload": payload,
+            "partial": bool(payload["open_items"].get("estimated")),
+        }
+    return payload
+
+
+def _warm_views(cfg: Config) -> None:
+    """Reconstruct every process ahead of being asked, one at a time.
+
+    The panel is summoned and expects an answer; this is the difference between
+    a cache that helps the second visit and one that helps the first. Sequential
+    on purpose — see load_model on what concurrent inference does here.
+    """
+    from muster import processes
+
+    conn = None
+    try:
+        conn = db.connect(cfg.db_path)
+        for process in processes.all_processes(conn):
+            _process_view(cfg, conn, process)
+    except Exception as exc:  # noqa: BLE001 — a warm cache is an optimisation
+        log.debug("view warm-up stopped: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _job_view(job: dict) -> dict:
@@ -324,6 +488,11 @@ def _why_empty(
 def create_app(cfg: Config | None = None) -> FastAPI:
     cfg = cfg or load_config()
     store = BlobStore(cfg.blob_dir)
+
+    # A new app is a new server: nothing derived from the last one's database
+    # should survive into this one.
+    with _views_lock:
+        _views.clear()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -562,66 +731,19 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.get("/process/{slug}")
     def process_show(slug: str, _db: None = Depends(require_db)) -> dict:
-        """Timeline, open items, and everything this could not account for."""
-        from muster import extraction
-        from muster import gather as gather_mod
-        from muster import openitems, processes
+        """Timeline, open items, and everything this could not account for.
+
+        Served from the cache the home page filled, when it is still current. The
+        overview computes exactly this; recomputing it because somebody clicked
+        would be the same work with somebody watching.
+        """
+        from muster import processes
 
         conn = _connection(cfg)
         process = processes.get(conn, slug)
         if process is None:
             raise ApiError(404, "not_found", f"No process {slug!r}.")
-
-        result = gather_mod.gather(conn, process)
-        report = openitems.compute(
-            conn, result, model=cfg.extract.model_id, process_id=process.id
-        )
-
-        rows = {r["id"]: r for r in _process_rows(conn, result.doc_ids)}
-        timeline = [
-            {
-                "doc_id": doc_id,
-                "date": rows[doc_id]["doc_date"] if doc_id in rows else None,
-                "title": rows[doc_id]["title"] if doc_id in rows else None,
-                "source": rows[doc_id]["source"] if doc_id in rows else None,
-                "kind": _kind(
-                    rows[doc_id]["mime"] if doc_id in rows else None,
-                    rows[doc_id]["source_uid"] if doc_id in rows else "",
-                ),
-                "counterparty": rows[doc_id]["counterparty"] if doc_id in rows else None,
-                # Why this document is here. Never omitted.
-                "reason": result.inclusions[doc_id].reason,
-                "via": result.inclusions[doc_id].via,
-            }
-            for doc_id in result.doc_ids
-        ]
-
-        pending = extraction.pending(conn, result.doc_ids)
-
-        return {
-            "process": {
-                "slug": process.slug, "name": process.name,
-                "anchors": [{"kind": a.kind, "value": a.value} for a in process.anchors],
-            },
-            "gather": {
-                "version": result.version,
-                "size": result.size,
-                "capped": result.capped,
-                "dropped": result.dropped,
-                "depth_reached": result.depth_reached,
-                # Documents the seed found that no anchor explains: the count
-                # that says an anchor is probably missing.
-                "seed_only": len(result.seed_only),
-            },
-            "open_items": report.as_json(),
-            "extraction": {
-                "model_id": cfg.extract.model_id,
-                "version": extraction.EXTRACTOR_VERSION,
-                "pending": len(pending),
-            },
-            "timeline": timeline,
-        }
-
+        return _process_view(cfg, conn, process)
     @app.post("/process/{slug}/dismiss")
     def process_dismiss(slug: str, body: dict = Body(...),
                         _db: None = Depends(require_db)) -> dict:
@@ -727,38 +849,38 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         Built from cached judgements only, so opening the panel never waits on a
         model. A process nobody has opened yet reports its open count as an upper
         bound and says so, rather than either blocking or quietly guessing.
+
+        Shares one cache with /process/{slug}: this screen does the work a click
+        needs, and used to throw it away.
         """
-        from muster import extraction
-        from muster import gather as gather_mod
-        from muster import openitems, processes, syncstate
+        from muster import processes, syncstate
 
         conn = _connection(cfg)
         summaries = []
         for process in processes.all_processes(conn):
-            result = gather_mod.gather(conn, process)
-            report = openitems.compute(
-                conn, result, model=cfg.extract.model_id,
-                process_id=process.id, cached_only=True,
-            )
-            counts = report.as_json()["counts"]
+            # The same payload the process screen serves, so the two can never
+            # disagree about a number — and so clicking one of these lines opens
+            # something already built.
+            view = _process_view(cfg, conn, process, cached_only=True)
+            items = view["open_items"]
+            counts = items["counts"]
             summaries.append({
                 "slug": process.slug,
                 "name": process.name,
-                "documents": result.size,
-                "anchors": len(process.anchors),
+                "documents": view["gather"]["size"],
+                "anchors": len(view["process"]["anchors"]),
                 # The number of things you would actually see and act on, after
                 # duplicates are collapsed and dismissals applied — not the raw
                 # request count, which reads higher and means something else.
-                "open": len(report.items),
+                "open": len(items["items"]),
                 "settled_by_me": counts["settled_by_me"],
                 "awaiting_confirmation": counts["awaiting_confirmation"],
-                "next_deadline": report.next_deadline,
+                "next_deadline": items["next_deadline"],
                 # An upper bound rather than a count, when judgements are missing.
-                "estimated": report.estimated,
-                "extraction_pending": len(extraction.pending(conn, result.doc_ids)),
+                "estimated": bool(items["estimated"]),
+                "extraction_pending": view["extraction"]["pending"],
                 "last_activity": max(
-                    (r["doc_date"] for r in _process_rows(conn, result.doc_ids)
-                     if r["doc_date"]),
+                    (row["date"] for row in view["timeline"] if row["date"]),
                     default=None,
                 ),
             })

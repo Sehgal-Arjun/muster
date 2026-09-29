@@ -791,3 +791,107 @@ def test_stopping_a_job_asks_rather_than_kills(client) -> None:
 
 def test_an_unknown_extract_job_is_404(client) -> None:
     assert client.get("/process/extract/nope").status_code == 404
+
+
+# --- the view cache -------------------------------------------------------
+
+
+@pytest.fixture
+def with_process(client, conn):
+    from muster import processes
+
+    made = processes.create(conn, "Warehouse lease")
+    processes.add_anchor(conn, made.id, "domain", "example.com")
+    conn.commit()
+    return made
+
+
+def test_opening_a_process_reuses_what_home_already_built(
+    client, conn, with_process, monkeypatch
+) -> None:
+    """The overview computes exactly what a click needs. Recomputing it because
+    somebody clicked would be the same two seconds with somebody watching."""
+    from muster import api as api_mod
+
+    builds: list[str] = []
+    real = api_mod._build_process_view
+
+    def counted(cfg, conn_, process, **kwargs):
+        builds.append(process.slug)
+        return real(cfg, conn_, process, **kwargs)
+
+    monkeypatch.setattr(api_mod, "_build_process_view", counted)
+
+    client.get("/home")
+    assert builds == [with_process.slug]
+    client.get(f"/process/{with_process.slug}")
+    assert builds == [with_process.slug], "the click rebuilt what home had built"
+
+
+def test_the_numbers_on_both_screens_are_the_same_object(
+    client, with_process
+) -> None:
+    home = next(
+        p for p in client.get("/home").json()["processes"]
+        if p["slug"] == with_process.slug
+    )
+    view = client.get(f"/process/{with_process.slug}").json()
+    assert home["open"] == len(view["open_items"]["items"])
+    assert home["documents"] == view["gather"]["size"]
+    assert home["next_deadline"] == view["open_items"]["next_deadline"]
+
+
+def test_settling_an_item_invalidates_the_cache(client, conn, with_process) -> None:
+    """A stale view is worse than a slow one: it says you still owe something you
+    have just marked done."""
+    from muster import api as api_mod
+
+    client.get(f"/process/{with_process.slug}")
+    before = dict(api_mod._views[with_process.slug])
+    client.post(
+        f"/process/{with_process.slug}/dismiss",
+        json={"what": "something invented", "verdict": "done"},
+    )
+    client.get(f"/process/{with_process.slug}")
+    assert api_mod._views[with_process.slug]["key"] != before["key"]
+
+
+def test_a_new_document_invalidates_the_cache(client, conn, with_process) -> None:
+    from muster import api as api_mod
+
+    client.get(f"/process/{with_process.slug}")
+    before = api_mod._views[with_process.slug]["key"]
+    conn.execute(
+        "INSERT INTO docs (source, source_uid, content_hash, mime, doc_date,"
+        " date_source, ingested_at, title) VALUES ('file', 'cache-buster',"
+        " 'deadbeef', 'text/plain', '2026-01-01T00:00:00+00:00', 'header',"
+        " '2026-01-01', 'x')"
+    )
+    conn.commit()
+    client.get(f"/process/{with_process.slug}")
+    assert api_mod._views[with_process.slug]["key"] != before
+
+
+def test_an_estimated_view_is_rebuilt_when_the_real_one_is_asked_for(
+    client, conn, with_process, monkeypatch
+) -> None:
+    """Good enough for an overview, not good enough for the screen you opened."""
+    from muster import api as api_mod
+
+    builds: list[dict] = []
+    real = api_mod._build_process_view
+
+    def counted(cfg, conn_, process, **kwargs):
+        builds.append(kwargs)
+        payload = real(cfg, conn_, process, **kwargs)
+        # Force the partial case: a real one needs an uncached judgement, which
+        # needs an extraction and a model.
+        payload["open_items"]["estimated"] = kwargs.get("cached_only", False)
+        return payload
+
+    monkeypatch.setattr(api_mod, "_build_process_view", counted)
+
+    client.get("/home")
+    assert builds == [{"cached_only": True}]
+    client.get(f"/process/{with_process.slug}")
+    assert builds == [{"cached_only": True}, {"cached_only": False}]

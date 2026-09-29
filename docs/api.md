@@ -550,6 +550,14 @@ of an empty screen when nothing has been typed.
 
 Sorted soonest-deadline-first; a process with no deadline falls to the end.
 
+Every summary here is read from the *same payload* `GET /process/{slug}` serves,
+so the overview and the detail screen cannot disagree about a number, and opening
+a process the overview has already listed is a cache read rather than a rebuild.
+Views are reconstructed by a background thread at startup and again after a sync
+or an extraction finishes; they are invalidated by any new document, any
+extraction, an anchor change, or a dismissal. Measured warm: `/home` **39ms**,
+opening a process **6–10ms**.
+
 `open` is the number of items the process view would list — after duplicates are
 collapsed and dismissals applied — and not `counts.requests_open`, which is
 larger and answers a different question. Two screens disagreeing about the same
