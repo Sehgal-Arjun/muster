@@ -16,6 +16,7 @@ import { EmptyState } from "./components/EmptyState";
 import { FolderJump } from "./components/FolderJump";
 import { GatherView } from "./components/GatherView";
 import { HomeView } from "./components/HomeView";
+import { applyLayout, storeLayout, storedLayout, type Layout } from "./layout";
 import { ProcessPicker } from "./components/ProcessPicker";
 import { Footer } from "./components/Footer";
 import { ResultRow } from "./components/ResultRow";
@@ -104,6 +105,12 @@ export default function App() {
   const [processes, setProcesses] = useState<ProcessSummary[]>([]);
   const [picking, setPicking] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  /**
+   * "stack" is the launcher: one column, a document replaces the list. "split"
+   * keeps the list on the left and renders the document beside it, which is what
+   * reading mail rather than finding it actually wants.
+   */
+  const [layout, setLayout] = useState<Layout>(storedLayout);
   // When the last refresh was asked for, so summoning the panel repeatedly does
   // not mean a request each time.
   const lastRefresh = useRef(0);
@@ -182,10 +189,26 @@ export default function App() {
 
   const hits = response?.results ?? [];
   const reading = stack.length > 0;
+  /**
+   * The document the list is pointing at, for the row highlight in split mode:
+   * the outermost one, so following a message to its attachment still marks the
+   * message you came from rather than nothing at all.
+   */
+  const activeDocId = (() => {
+    for (const view of stack) if (view.kind === "doc") return view.id;
+    return null;
+  })();
   const gathering = gatherSlug !== null || picking;
   const current: Hit | null = hits[selected] ?? null;
 
   useEffect(() => inputRef.current?.focus(), []);
+
+  // The window has to change shape, not just the stylesheet: a message at 720
+  // points is a column of six words.
+  useEffect(() => {
+    storeLayout(layout);
+    void applyLayout(layout);
+  }, [layout]);
 
   /**
    * Take focus on every summon, not just the first.
@@ -399,6 +422,21 @@ export default function App() {
   }, [folder, hide]);
 
   /** Read a document inside the panel. */
+  /**
+   * In split mode the selection *is* the preview.
+   *
+   * The list is a reading queue there, and needing to press enter on each one
+   * turns walking a queue into a series of decisions. Debounced, so holding the
+   * down arrow does not fetch every row it passes through.
+   */
+  useEffect(() => {
+    if (layout !== "split") return;
+    const hit = hits[selected];
+    if (!hit || stack.length > 1 || activeDocId === hit.doc_id) return;
+    const timer = setTimeout(() => setStack([{ kind: "doc", id: hit.doc_id }]), 140);
+    return () => clearTimeout(timer);
+  }, [layout, hits, selected, stack.length, activeDocId]);
+
   const read = useCallback((hit: Hit | null) => {
     if (!hit) return;
     listScroll.current = resultsRef.current?.scrollTop ?? 0;
@@ -433,9 +471,12 @@ export default function App() {
    * their query at the same time.
    */
   useEffect(() => {
-    if (reading) inputRef.current?.blur();
+    // Not in split mode: there the document sits beside the list rather than in
+    // front of it, and taking focus away would stop the reader typing a new
+    // query without first dismissing what they are reading.
+    if (reading && layout !== "split") inputRef.current?.blur();
     else inputRef.current?.focus();
-  }, [reading]);
+  }, [reading, layout]);
 
   // Restore the list exactly where it was, once it is on screen again.
   useEffect(() => {
@@ -569,6 +610,11 @@ export default function App() {
    */
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "\\") {
+        event.preventDefault();
+        setLayout((current) => (current === "split" ? "stack" : "split"));
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "h") {
         // Bound at the document too: the reader and the picker both stop the
         // container handler, and "go back to the start" should work anywhere.
@@ -587,7 +633,10 @@ export default function App() {
         setPicking(false);
         return;
       }
-      if (stack.length) {
+      // Split mode: the preview follows the selection, so backing out of it
+      // would only re-open it a moment later and Escape would look broken.
+      // Escape there means what it means in the list — the level above, or out.
+      if (stack.length > (layout === "split" ? 1 : 0)) {
         back();
         return;
       }
@@ -599,7 +648,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onEscape);
     return () => document.removeEventListener("keydown", onEscape);
-  }, [showActions, hide, stack.length, back, gatherSlug, picking, goHome]);
+  }, [showActions, hide, stack.length, back, gatherSlug, picking, goHome, layout]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (showActions) return;
@@ -624,6 +673,9 @@ export default function App() {
       // Enter reads it here. Leaving the panel to open Gmail or Preview is the
       // failure this view exists to remove; ⌘↵ still reveals the original.
       void (meta ? reveal(current) : read(current));
+    } else if (meta && event.key === "\\") {
+      event.preventDefault();
+      setLayout((current) => (current === "split" ? "stack" : "split"));
     } else if (meta && event.key.toLowerCase() === "h") {
       event.preventDefault();
       goHome();
@@ -650,9 +702,109 @@ export default function App() {
     }
   }
 
-  return (
-    <div className="app" onKeyDown={onKeyDown}>
-      <div className="search">
+  const split = layout === "split";
+  // In split mode the list stays put and the document appears beside it, so the
+  // reader is not "in" a document — they are looking at one from the list.
+  const showDocInPane = split && reading;
+
+  const listContent = (
+    <>
+      {hits.length > 0 && (
+        <ul className="rows" ref={listRef} role="listbox">
+          {hits.map((hit, i) => (
+            <ResultRow
+              key={`${hit.doc_id}-${hit.rank}`}
+              hit={hit}
+              selected={i === selected}
+              onSelect={() => setSelected(i)}
+              // Clicking a result reads it, exactly as Enter does. Sending the
+              // reader straight out to Preview or Gmail skips the view built for
+              // the purpose, and is not what a click means anywhere else in a
+              // list.
+              onOpen={() => read(hit)}
+            />
+          ))}
+        </ul>
+      )}
+
+      {hits.length === 0 && response?.empty_reason && (
+        <EmptyState reason={response.empty_reason} onRetry={setOverride} />
+      )}
+
+      {/* A search in flight is not an empty result list. Drawing one is how a
+          slow first query — the model loading after a restart — became
+          indistinguishable from a document that was not there. */}
+      {hits.length === 0 && !response && !error && searching && (
+        <div className="empty">
+          <div className="empty-headline">Searching…</div>
+          {!modelReady && (
+            <div className="empty-detail dim">
+              First search since the server started — loading the embedding
+              model. This one is slow; the rest are not.
+            </div>
+          )}
+        </div>
+      )}
+
+      {hits.length === 0 && !response && !error && !searching && (
+        <HomeView onOpenProcess={(slug) => setGatherSlug(slug)} />
+      )}
+
+      {error && (
+        <div className="empty">
+          <div className="empty-headline">Cannot reach the index</div>
+          <div className="empty-detail">{error}</div>
+          <div className="empty-detail dim">
+            Start it with <code>muster serve</code>.
+          </div>
+        </div>
+      )}
+    </>
+  );
+
+  const picker = (
+    <ProcessPicker
+      processes={processes}
+      query={query}
+      onOpen={(slug) => {
+        setPicking(false);
+        setGatherSlug(slug);
+      }}
+      onCreated={() => void refreshProcesses()}
+      onClose={() => setPicking(false)}
+    />
+  );
+
+  const gatherPane = (
+    <GatherView
+      slug={gatherSlug || null}
+      query={query}
+      // So the row you are reading stays marked in the list beside it.
+      activeDocId={split ? activeDocId : null}
+      onOpenDoc={(docId) => {
+        listScroll.current = resultsRef.current?.scrollTop ?? 0;
+        setStack([{ kind: "doc", id: docId }]);
+      }}
+    />
+  );
+
+  const docPane = reading ? (
+    <DocView
+      view={stack[stack.length - 1]!}
+      query={query}
+      blobDir={blobDir}
+      // The list keeps the arrows in split mode, and the query field keeps the
+      // letters. A document that also claimed j and k would scroll while the
+      // reader was typing.
+      keys={!split}
+      onOpen={(next) => setStack((current) => [...current, next])}
+      onExit={back}
+      onDoc={setOpenDoc}
+    />
+  ) : null;
+
+  const searchBox = (
+    <div className="search">
         <input
           ref={inputRef}
           className="query"
@@ -663,110 +815,85 @@ export default function App() {
           spellCheck={false}
           autoComplete="off"
         />
-        {response?.query.searched !== response?.query.raw && response && (
-          <span className="rewritten" title="the date became a filter">
-            {response.query.searched}
-          </span>
-        )}
-      </div>
+      {response?.query.searched !== response?.query.raw && response && (
+        <span className="rewritten" title="the date became a filter">
+          {response.query.searched}
+        </span>
+      )}
+    </div>
+  );
 
-      {folder && !reading && !gathering && <FolderJump folder={folder} onOpen={() => void openFolder()} />}
+  const folderHint =
+    folder && !reading && !gathering ? (
+      <FolderJump folder={folder} onOpen={() => void openFolder()} />
+    ) : null;
 
-      <div className={`results${reading || gathering ? " reading" : ""}`} ref={resultsRef}>
-        {picking ? (
-          <ProcessPicker
-            processes={processes}
-            query={query}
-            onOpen={(slug) => {
-              setPicking(false);
-              setGatherSlug(slug);
-            }}
-            onCreated={() => void refreshProcesses()}
-            onClose={() => setPicking(false)}
-          />
-        ) : gatherSlug !== null && !reading ? (
-          <GatherView
-            slug={gatherSlug || null}
-            query={query}
-            onOpenDoc={(docId) => {
-              listScroll.current = resultsRef.current?.scrollTop ?? 0;
-              setStack([{ kind: "doc", id: docId }]);
-            }}
-          />
-        ) : reading ? (
-          <DocView
-            view={stack[stack.length - 1]!}
-            query={query}
-            blobDir={blobDir}
-            onOpen={(next) => setStack((current) => [...current, next])}
-            onExit={back}
-            onDoc={setOpenDoc}
-          />
-        ) : (
-        <>
-        {hits.length > 0 && (
-          <ul className="rows" ref={listRef} role="listbox">
-            {hits.map((hit, i) => (
-              <ResultRow
-                key={`${hit.doc_id}-${hit.rank}`}
-                hit={hit}
-                selected={i === selected}
-                onSelect={() => setSelected(i)}
-                // Clicking a result reads it, exactly as Enter does. Sending
-                // the reader straight out to Preview or Gmail skips the view
-                // built for the purpose, and is not what a click means anywhere
-                // else in a list.
-                onOpen={() => read(hit)}
-              />
-            ))}
-          </ul>
-        )}
+  const footer = (
+    <Footer
+      response={response}
+      mode={mode}
+      error={error}
+      reading={reading && !split}
+      readingMail={openDoc?.mime === "message/rfc822"}
+      gathering={gatherSlug !== null}
+      split={split}
+      syncing={syncing}
+    />
+  );
 
-        {hits.length === 0 && response?.empty_reason && (
-          <EmptyState reason={response.empty_reason} onRetry={setOverride} />
-        )}
-
-        {/* A search in flight is not an empty result list. Drawing one is how
-            a slow first query — the model loading after a restart — became
-            indistinguishable from a document that was not there. */}
-        {hits.length === 0 && !response && !error && searching && (
-          <div className="empty">
-            <div className="empty-headline">Searching…</div>
-            {!modelReady && (
-              <div className="empty-detail dim">
-                First search since the server started — loading the embedding
-                model. This one is slow; the rest are not.
+  if (split) {
+    return (
+      <div className="app app-split" onKeyDown={onKeyDown}>
+        <div className="split-body">
+          <aside className="pane-side">
+            {searchBox}
+            {folder && !gathering && (
+              <FolderJump folder={folder} onOpen={() => void openFolder()} />
+            )}
+            <div className="results" ref={resultsRef}>
+              {picking ? picker : gatherSlug !== null ? gatherPane : listContent}
+            </div>
+          </aside>
+          <main className="pane-main">
+            {showDocInPane ? (
+              docPane
+            ) : (
+              <div className="empty pane-empty">
+                <div className="empty-headline">Nothing open</div>
+                <div className="empty-detail dim">
+                  Select something on the left and it renders here, as it was
+                  sent — attachments and all.
+                </div>
+                <div className="empty-detail dim">⌘\\ returns to one column.</div>
               </div>
             )}
-          </div>
-        )}
-
-        {hits.length === 0 && !response && !error && !searching && (
-          <HomeView onOpenProcess={(slug) => setGatherSlug(slug)} />
-        )}
-
-        {error && (
-          <div className="empty">
-            <div className="empty-headline">Cannot reach the index</div>
-            <div className="empty-detail">{error}</div>
-            <div className="empty-detail dim">
-              Start it with <code>muster serve</code>.
-            </div>
-          </div>
-        )}
-        </>
+          </main>
+        </div>
+        {footer}
+        {showActions && (
+          <Actions hit={current} actions={actions} onClose={() => setShowActions(false)} />
         )}
       </div>
+    );
+  }
 
-      <Footer
-          response={response}
-          mode={mode}
-          error={error}
-          reading={reading}
-          readingMail={openDoc?.mime === "message/rfc822"}
-          gathering={gatherSlug !== null}
-          syncing={syncing}
-        />
+  return (
+    <div className="app" onKeyDown={onKeyDown}>
+      {searchBox}
+
+      {folderHint}
+
+      <div className={`results${reading || gathering ? " reading" : ""}`} ref={resultsRef}>
+        {picking
+          ? picker
+          : gatherSlug !== null && !reading
+            ? gatherPane
+            : reading
+              ? docPane
+              : listContent}
+      </div>
+
+      {footer}
 
       {showActions && (
         <Actions hit={current} actions={actions} onClose={() => setShowActions(false)} />

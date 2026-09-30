@@ -95,6 +95,32 @@ fn hide_panel(app: tauri::AppHandle) {
     hide(&app);
 }
 
+/// Resize the panel for the layout the reader has chosen.
+///
+/// A launcher and a reading window want different shapes: 720 points is right for
+/// a list of results and far too narrow for an email beside one. Rather than
+/// scale a single size, the panel becomes the size the chosen layout needs.
+///
+/// On the main thread, and through `get_webview_window` rather than
+/// `panel.to_window()` — see `toggle` for what that conversion does.
+#[tauri::command]
+fn set_layout(app: tauri::AppHandle, wide: bool) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(window) = handle.get_webview_window(PANEL) {
+            let size = if wide {
+                tauri::LogicalSize::new(1180.0, 700.0)
+            } else {
+                tauri::LogicalSize::new(720.0, 460.0)
+            };
+            let _ = window.set_size(size);
+            // Re-centre: growing from a centred position otherwise pushes the
+            // panel off toward one corner.
+            let _ = window.center();
+        }
+    });
+}
+
 #[cfg(target_os = "macos")]
 fn hide(app: &tauri::AppHandle) {
     on_main(app, |panel| panel.hide());
@@ -192,7 +218,7 @@ pub fn run() {
     }
 
     builder
-        .invoke_handler(tauri::generate_handler![hide_panel, start_server])
+        .invoke_handler(tauri::generate_handler![hide_panel, start_server, set_layout])
         .setup(|app| {
             // No Dock icon and no menu bar: this is summoned, not launched.
             #[cfg(target_os = "macos")]

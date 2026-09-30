@@ -1,0 +1,46 @@
+/**
+ * Which shape the panel is: a launcher, or a reading window.
+ *
+ * Two layouts, because they are answers to different questions. "What do I have
+ * about this" wants a narrow list and nothing else on screen. "What does this
+ * actually say" wants the message rendered at a readable width, with the list
+ * still there beside it so the next one is a keystroke away rather than a
+ * navigation.
+ *
+ * The preference outlives the process — a layout that reset on every launch
+ * would be a worse default than either of them.
+ */
+
+export type Layout = "stack" | "split";
+
+const KEY = "muster.layout";
+
+export function storedLayout(): Layout {
+  try {
+    return localStorage.getItem(KEY) === "split" ? "split" : "stack";
+  } catch {
+    // Private mode, or storage disabled. The narrow layout is the safe default.
+    return "stack";
+  }
+}
+
+export function storeLayout(layout: Layout): void {
+  try {
+    localStorage.setItem(KEY, layout);
+  } catch {
+    // Not worth reporting: the layout still applies for this session.
+  }
+}
+
+/**
+ * Resize the window to match. The webview cannot do this itself — the panel is
+ * an NSPanel and its size belongs to AppKit, on the main thread.
+ */
+export async function applyLayout(layout: Layout): Promise<void> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("set_layout", { wide: layout === "split" });
+  } catch {
+    // Running in a browser against the mock fixtures: CSS still does its half.
+  }
+}

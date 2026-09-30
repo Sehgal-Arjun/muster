@@ -612,3 +612,41 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
   text-decoration: underline;
 }
 .caveat-run { color: var(--accent); }
+
+/* --- split layout -------------------------------------------------------- */
+
+/* Two panes: the list on the left keeps its place while a document renders
+   beside it. A launcher and a reading window want different shapes, so this is
+   a different window size rather than the same one rearranged. */
+.app-split .split-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.pane-side {
+  width: 380px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+}
+.pane-side .results { flex: 1; overflow-y: auto; }
+.pane-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* The document manages its own scrolling inside the pane. */
+.pane-main .doc { flex: 1; min-height: 0; }
+.pane-empty { margin: auto; max-width: 340px; text-align: center; }
+
+/* Narrower rows: the same list in 380 points rather than 720. */
+.pane-side .row { gap: 8px; padding: 8px 10px; }
+.pane-side .snippet { display: none; }
+
+/* The row whose document is showing beside it. Distinct from the keyboard
+   selection, which can be somewhere else entirely. */
+.gather-row.active { background: var(--sel); }

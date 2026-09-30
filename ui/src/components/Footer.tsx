@@ -11,6 +11,7 @@ const SEARCH_HINTS: Array<[string, string]> = [
   ["⌘⇧F", "open folder"],
   ["⌘K", "actions"],
   ["⌘1/2/3", "mode"],
+  ["⌘\\", "layout"],
   ["esc", "close"],
 ];
 
@@ -22,6 +23,7 @@ const MAIL_HINTS: Array<[string, string]> = [
   ["⌘O", "open in Gmail"],
   ["⌘C", "copy body"],
   ["⌘H", "home"],
+  ["⌘\\", "layout"],
   ["esc", "back"],
 ];
 
@@ -56,6 +58,7 @@ export function Footer({
   reading,
   readingMail,
   gathering,
+  split,
   syncing,
 }: {
   response: SearchResponse | null;
@@ -66,12 +69,16 @@ export function Footer({
   readingMail?: boolean;
   /** Gather has its own verbs; the search hints would be wrong here. */
   gathering?: boolean;
+  /** Two panes: the list keeps the arrows, so the hints stay the list's. */
+  split?: boolean;
   syncing: boolean;
 }) {
   return (
     <footer className="footer">
       <div className="hints">
-        {(reading
+        {/* Split mode reads from the list, so the list's keys are the true ones
+            even with a document on screen beside it. */}
+        {(reading && !split
           ? readingMail
             ? MAIL_HINTS
             : READING_HINTS

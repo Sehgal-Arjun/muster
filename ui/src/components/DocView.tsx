@@ -83,6 +83,7 @@ export function DocView({
   view,
   query,
   blobDir,
+  keys = true,
   onOpen,
   onExit,
   onDoc,
@@ -91,6 +92,11 @@ export function DocView({
   /** The query that produced this document, for highlighting. */
   query: string;
   blobDir: string | null;
+  /**
+   * Whether this document owns the plain keys. False in split mode, where the
+   * arrows belong to the list beside it.
+   */
+  keys?: boolean;
   onOpen: (next: View) => void;
   onExit: () => void;
   /** So the footer can name the keys accurately for what is on screen. */
@@ -216,6 +222,12 @@ export function DocView({
       const meta = event.metaKey || event.ctrlKey;
       const scroller = scrollRef.current;
 
+      // In split mode the arrows belong to the list and the letters to the query
+      // field: a document that also claimed j and k would scroll while the
+      // reader was typing. The ⌘ keys still act on what is open, because nothing
+      // else wants them.
+      if (!keys && !meta) return;
+
       if (meta && event.key.toLowerCase() === "o") {
         event.preventDefault();
         void openExternally();
@@ -272,7 +284,7 @@ export function DocView({
 
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [doc, attachments, attachSel, preview, reveal, openExternally]);
+  }, [doc, attachments, attachSel, preview, reveal, openExternally, keys]);
 
   if (view.kind === "blob") {
     return (

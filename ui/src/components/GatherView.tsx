@@ -32,11 +32,18 @@ function shortDate(iso: string | null): string {
 export function GatherView({
   slug,
   query,
+  activeDocId,
   onOpenDoc,
 }: {
   slug: string | null;
   /** Used only to offer creating a process when none exists yet. */
   query: string;
+  /**
+   * The document showing beside this one, in split mode. Marked here so the
+   * process still reads as a whole while you work through it — the point of
+   * keeping the list on screen is knowing where in it you are.
+   */
+  activeDocId?: number | null;
   onOpenDoc: (docId: number) => void;
 }) {
   const [view, setView] = useState<ProcessView | null>(null);
@@ -341,7 +348,7 @@ export function GatherView({
           {view.timeline.map((entry) => (
             <li
               key={entry.doc_id}
-              className="gather-row"
+              className={`gather-row${entry.doc_id === activeDocId ? " active" : ""}`}
               onClick={() => onOpenDoc(entry.doc_id)}
               title={`included because: ${entry.reason}${entry.via ? ` (${entry.via})` : ""}`}
             >
