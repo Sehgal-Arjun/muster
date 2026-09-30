@@ -650,3 +650,7 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
 /* The row whose document is showing beside it. Distinct from the keyboard
    selection, which can be somewhere else entirely. */
 .gather-row.active { background: var(--sel); }
+
+/* The panel has no titlebar, so these bars are the handles. Only their own
+   background drags — a mousedown on the query field belongs to the field. */
+.drag-handle { cursor: default; }

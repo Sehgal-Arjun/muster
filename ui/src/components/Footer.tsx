@@ -1,3 +1,5 @@
+import type { MouseEvent } from "react";
+
 import type { Mode, SearchResponse } from "../api";
 
 const SEARCH_HINTS: Array<[string, string]> = [
@@ -60,6 +62,7 @@ export function Footer({
   gathering,
   split,
   syncing,
+  onDrag,
 }: {
   response: SearchResponse | null;
   mode: Mode;
@@ -72,9 +75,11 @@ export function Footer({
   /** Two panes: the list keeps the arrows, so the hints stay the list's. */
   split?: boolean;
   syncing: boolean;
+  /** The other handle for moving the panel. See beginDrag in App. */
+  onDrag?: (event: MouseEvent) => void;
 }) {
   return (
-    <footer className="footer">
+    <footer className="footer drag-handle" onMouseDown={onDrag}>
       <div className="hints">
         {/* Split mode reads from the list, so the list's keys are the true ones
             even with a document on screen beside it. */}

@@ -10,7 +10,17 @@
 //! Nothing here knows anything about retrieval. The panel talks to
 //! `muster serve` over loopback HTTP, which the user starts themselves.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::{Emitter, Manager};
+
+/// Whether the reader has picked a place for the panel.
+///
+/// Until they do, every summon centres it, which is what a launcher should do.
+/// Once they have dragged it somewhere, centring would throw their choice away —
+/// so from then on the panel appears where they left it, and a layout change
+/// keeps the middle of the window where the middle of the window was.
+static PLACED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{
@@ -95,6 +105,75 @@ fn hide_panel(app: tauri::AppHandle) {
     hide(&app);
 }
 
+/// Where a window of `size` sits, centred on a monitor of `screen` at `origin`.
+///
+/// Pure, so the arithmetic that was wrong can be tested. The bug was not the
+/// formula — it was measuring the window instead of being told the size it is
+/// about to become.
+fn centred_origin(origin: (f64, f64), screen: (f64, f64), size: (f64, f64)) -> (f64, f64) {
+    (
+        origin.0 + (screen.0 - size.0) / 2.0,
+        origin.1 + (screen.1 - size.1) / 2.0,
+    )
+}
+
+/// Where a window of `size` sits so that its middle lands on `centre`.
+///
+/// What a resize does to a window the reader has placed themselves: it grows in
+/// every direction rather than dragging the window off to one side.
+fn anchored_origin(centre: (f64, f64), size: (f64, f64)) -> (f64, f64) {
+    (centre.0 - size.0 / 2.0, centre.1 - size.1 / 2.0)
+}
+
+/// Centre the panel on the monitor it is on, for a known size.
+///
+/// Not `window.center()`. That measures the window as it is right now, and the
+/// resize that is about to make it 1180 wide has not landed yet — so it centres
+/// a 720-point window and the extra 460 grow off to the right. The panel opened
+/// visibly right of centre, and the wider the layout the worse it got. Doing the
+/// arithmetic against the size we are setting has no such ordering to get wrong.
+#[cfg(target_os = "macos")]
+fn centre_on_monitor(window: &tauri::WebviewWindow, size: tauri::LogicalSize<f64>) {
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let scale = monitor.scale_factor();
+        let origin = monitor.position().to_logical::<f64>(scale);
+        let screen = monitor.size().to_logical::<f64>(scale);
+        let (x, y) = centred_origin(
+            (origin.x, origin.y),
+            (screen.width, screen.height),
+            (size.width, size.height),
+        );
+        let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+    }
+}
+
+/// Begin an ordinary window drag, from a mousedown in the panel's chrome.
+///
+/// There is no titlebar to drag — that is the whole point of the panel — so the
+/// query bar and the footer are the handles. AppKit runs the drag loop itself
+/// once asked, which is why this is one call and not a stream of mouse events.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn start_drag(app: tauri::AppHandle) {
+    // Recorded before the drag rather than after it: the reader has expressed a
+    // preference by picking the window up, whether or not they move it far.
+    PLACED.store(true, Ordering::Relaxed);
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(window) = handle.get_webview_window(PANEL) {
+            let _ = window.start_dragging();
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn start_drag(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(PANEL) {
+        let _ = window.start_dragging();
+    }
+}
+
 /// Resize the panel for the layout the reader has chosen.
 ///
 /// A launcher and a reading window want different shapes: 720 points is right for
@@ -103,6 +182,7 @@ fn hide_panel(app: tauri::AppHandle) {
 ///
 /// On the main thread, and through `get_webview_window` rather than
 /// `panel.to_window()` — see `toggle` for what that conversion does.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 fn set_layout(app: tauri::AppHandle, wide: bool) {
     let handle = app.clone();
@@ -113,12 +193,43 @@ fn set_layout(app: tauri::AppHandle, wide: bool) {
             } else {
                 tauri::LogicalSize::new(720.0, 460.0)
             };
+
+            // Where the middle of the window is now, before it changes size.
+            let anchor = window.outer_position().ok().and_then(|position| {
+                let scale = window.scale_factor().unwrap_or(1.0);
+                let at = position.to_logical::<f64>(scale);
+                window.inner_size().ok().map(|inner| {
+                    let was = inner.to_logical::<f64>(scale);
+                    (at.x + was.width / 2.0, at.y + was.height / 2.0)
+                })
+            });
+
             let _ = window.set_size(size);
-            // Re-centre: growing from a centred position otherwise pushes the
-            // panel off toward one corner.
-            let _ = window.center();
+
+            if PLACED.load(Ordering::Relaxed) {
+                // Grow around the middle, so a window the reader placed stays
+                // where they placed it rather than jumping back to centre.
+                if let Some(centre) = anchor {
+                    let (x, y) = anchored_origin(centre, (size.width, size.height));
+                    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+                }
+            } else {
+                centre_on_monitor(&window, size);
+            }
         }
     });
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn set_layout(app: tauri::AppHandle, wide: bool) {
+    if let Some(window) = app.get_webview_window(PANEL) {
+        let _ = window.set_size(if wide {
+            tauri::LogicalSize::new(1180.0, 700.0)
+        } else {
+            tauri::LogicalSize::new(720.0, 460.0)
+        });
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -171,8 +282,15 @@ fn toggle(app: &tauri::AppHandle) {
             // the very first summon — which is why Escape then found nothing to
             // hide, the hotkey could not toggle, and clicking away never
             // dismissed. All three were the same line.
-            if let Some(window) = handle.get_webview_window(PANEL) {
-                let _ = window.center();
+            // Only until the reader has picked a place for it. After that,
+            // re-centring every summon would silently undo the drag.
+            if !PLACED.load(Ordering::Relaxed) {
+                if let Some(window) = handle.get_webview_window(PANEL) {
+                    let scale = window.scale_factor().unwrap_or(1.0);
+                    if let Ok(size) = window.inner_size() {
+                        centre_on_monitor(&window, size.to_logical::<f64>(scale));
+                    }
+                }
             }
             panel.show_and_make_key();
             // Not redundant with show_and_make_key. Under ActivationPolicy::Accessory
@@ -218,7 +336,9 @@ pub fn run() {
     }
 
     builder
-        .invoke_handler(tauri::generate_handler![hide_panel, start_server, set_layout])
+        .invoke_handler(tauri::generate_handler![
+            hide_panel, start_server, set_layout, start_drag
+        ])
         .setup(|app| {
             // No Dock icon and no menu bar: this is summoned, not launched.
             #[cfg(target_os = "macos")]
@@ -327,4 +447,43 @@ fn register_hotkey(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Err
     // working.
     app.global_shortcut().register(hotkey)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{anchored_origin, centred_origin};
+
+    /// The bug, written down: `window.center()` measured the window as it was —
+    /// 720 wide — and the resize to 1180 that was already in flight grew off to
+    /// the right, leaving the panel 230 points right of centre.
+    #[test]
+    fn centring_uses_the_size_being_set_not_the_size_it_had() {
+        let screen = (1512.0, 982.0);
+        let wide = centred_origin((0.0, 0.0), screen, (1180.0, 700.0));
+        assert_eq!(wide.0, 166.0);
+        // What the old code effectively did, and what it looked like.
+        let stale = centred_origin((0.0, 0.0), screen, (720.0, 460.0));
+        assert_eq!(stale.0, 396.0);
+        assert_eq!(stale.0 - wide.0, 230.0);
+    }
+
+    #[test]
+    fn centring_is_relative_to_the_monitor_the_panel_is_on() {
+        // A second display to the right of the first.
+        let on_second = centred_origin((1512.0, 0.0), (1920.0, 1080.0), (1180.0, 700.0));
+        assert_eq!(on_second.0, 1512.0 + 370.0);
+        assert_eq!(on_second.1, 190.0);
+    }
+
+    #[test]
+    fn a_placed_window_grows_around_its_middle() {
+        // Narrow panel dropped near the top left, then widened.
+        let centre = (100.0 + 360.0, 80.0 + 230.0);
+        let (x, y) = anchored_origin(centre, (1180.0, 700.0));
+        assert_eq!(x, 460.0 - 590.0);
+        assert_eq!(y, 310.0 - 350.0);
+        // The middle is exactly where it was.
+        assert_eq!(x + 590.0, centre.0);
+        assert_eq!(y + 350.0, centre.1);
+    }
 }

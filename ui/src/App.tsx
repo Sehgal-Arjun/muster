@@ -177,6 +177,25 @@ export default function App() {
     }
   }, []);
 
+  /**
+   * Pick the panel up and move it.
+   *
+   * There is no titlebar — that is the point of a panel — so the query bar and
+   * the footer are the handles. Only their own background: a mousedown that
+   * landed on the text field or a button belongs to that control, and a window
+   * that moves when you try to place the cursor is worse than one that cannot
+   * move at all.
+   */
+  const beginDrag = useCallback(async (event: React.MouseEvent) => {
+    if (event.target !== event.currentTarget) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("start_drag");
+    } catch {
+      // A browser, running against the fixtures. Nothing to drag.
+    }
+  }, []);
+
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
@@ -804,7 +823,7 @@ export default function App() {
   ) : null;
 
   const searchBox = (
-    <div className="search">
+    <div className="search drag-handle" onMouseDown={beginDrag}>
         <input
           ref={inputRef}
           className="query"
@@ -838,6 +857,7 @@ export default function App() {
       gathering={gatherSlug !== null}
       split={split}
       syncing={syncing}
+      onDrag={beginDrag}
     />
   );
 
