@@ -1,18 +1,12 @@
 import { useState } from "react";
 import { api, type Hit } from "../api";
+import { shortDate as sharedShortDate } from "../dates";
 import { Icon } from "./Icon";
 import { Score } from "./Score";
 import { Snippet } from "./Snippet";
 
 function shortDate(iso: string): string {
-  const d = new Date(iso);
-  const now = new Date();
-  const sameYear = d.getFullYear() === now.getFullYear();
-  return d.toLocaleDateString(undefined, {
-    day: "numeric",
-    month: "short",
-    ...(sameYear ? {} : { year: "numeric" }),
-  });
+  return sharedShortDate(iso, { year: false });
 }
 
 /**

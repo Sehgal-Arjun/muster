@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, type HomeView as Home } from "../api";
+import { isPast, shortDate } from "../dates";
 
 /**
  * The panel's resting state: what is going on, across everything.
@@ -12,18 +13,7 @@ import { ApiError, api, type HomeView as Home } from "../api";
  * model. A process nobody has opened yet reports its open count as an upper
  * bound and marks it, rather than blocking or quietly guessing.
  */
-function shortDate(iso: string | null): string {
-  if (!iso) return "";
-  const when = new Date(iso);
-  return Number.isNaN(when.getTime())
-    ? iso.slice(0, 10)
-    : when.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
-}
 
-function overdue(iso: string | null): boolean {
-  if (!iso) return false;
-  return new Date(iso) < new Date();
-}
 
 export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => void }) {
   const [home, setHome] = useState<Home | null>(null);
@@ -125,7 +115,7 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
                 )}
 
                 <span
-                  className={`gather-who dim${overdue(process.next_deadline) ? " home-overdue" : ""}`}
+                  className={`gather-who dim${isPast(process.next_deadline) ? " home-overdue" : ""}`}
                 >
                   {process.next_deadline ? `due ${shortDate(process.next_deadline)}` : ""}
                 </span>

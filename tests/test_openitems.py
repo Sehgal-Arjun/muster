@@ -468,3 +468,109 @@ def test_nothing_to_judge_is_not_an_estimate(conn, process) -> None:
                         process_id=process.id, cached_only=True)
     assert report.estimated is False
     assert [i.kind for i in report.items] == [OI.UNSATISFIED]
+
+
+# --- what counts as somebody asking you for something ---------------------
+
+
+def _attachment(conn, *, uid, title, when, mime="application/pdf"):
+    cursor = conn.execute(
+        "INSERT INTO docs (source, source_uid, content_hash, mime, doc_date,"
+        " date_source, ingested_at, title, sender, counterparty)"
+        " VALUES ('gmail', ?, ?, ?, ?, 'header', '2026-01-01', ?, ?, ?)",
+        (uid, f"h-{uid}", mime, when, title, THEM, THEM),
+    )
+    doc_id = cursor.lastrowid
+    conn.execute(
+        "INSERT INTO chunks (doc_id, ord, text, text_hash) VALUES (?, 0, ?, ?)",
+        (doc_id, title, f"t-{doc_id}"),
+    )
+    conn.commit()
+    return doc_id
+
+
+def test_a_checklist_in_an_attachment_is_not_a_request(conn, process) -> None:
+    """Measured on a real process: a photographed consular form yielded twelve
+    "requests" and an instructions document seven. Both list every document
+    anybody might ever need; neither asked this reader for anything."""
+    form = _attachment(conn, uid="form", title="instructions.pdf",
+                       when="2026-04-01T09:00:00+00:00")
+    _extract(conn, form, direction="inbound", requests_of_me=[
+        {"what": "a valid passport", "due": None},
+        {"what": "evidence of SEVIS fee payment", "due": None},
+    ])
+    report = _report(conn, process)
+    assert report.items == []
+    assert report.requests_total == 0
+    # Declined, not missing — the count says so.
+    assert report.as_json()["counts"]["asks_skipped"] == 2
+
+
+def test_an_attachment_still_counts_as_evidence(conn, process) -> None:
+    """Asymmetric on purpose: a file I sent is how an obligation gets discharged."""
+    asked = _mail(conn, uid="ask", title="Please send the insurance certificate",
+                  when="2026-04-01T09:00:00+00:00", sender=THEM)
+    _extract(conn, asked, direction="inbound",
+             requests_of_me=[{"what": "insurance certificate", "due": None}])
+    sent = _mail(conn, uid="sent", title="Here you go",
+                 when="2026-04-02T09:00:00+00:00", sender=OWN)
+    conn.execute(
+        "INSERT INTO attachments (doc_id, blob_path, content_hash, filename, mime)"
+        " VALUES (?, 'ab/abc', 'abc', 'insurance certificate.pdf', 'application/pdf')",
+        (sent,),
+    )
+    _extract(conn, sent, direction="outbound")
+    conn.commit()
+
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": true}')
+    assert report.requests_satisfied == 1
+
+
+# --- "next" means the next one coming ------------------------------------
+
+
+def test_a_deadline_from_two_years_ago_is_not_the_next_deadline(conn, process) -> None:
+    """The panel said "next deadline 5 Apr 2024" in August 2026."""
+    old = _mail(conn, uid="old", title="Rent due", when="2024-03-20T09:00:00+00:00",
+                sender=THEM)
+    _extract(conn, old, direction="inbound",
+             deadlines=[{"what": "last month's rent", "when": "2024-04-06"}])
+    report = _report(conn, process, today=date(2026, 8, 17))
+    assert report.next_deadline is None
+    assert [i.what for i in report.items if i.kind == OI.DEADLINE_NEAR] == []
+
+
+def test_a_recently_missed_deadline_is_still_raised_but_is_not_next(conn, process) -> None:
+    """A missed deadline is more urgent than an approaching one, not less — it is
+    simply not the *next* one."""
+    missed = _mail(conn, uid="missed", title="Survey", when="2026-07-20T09:00:00+00:00",
+                   sender=THEM)
+    _extract(conn, missed, direction="inbound",
+             deadlines=[{"what": "the survey", "when": "2026-07-30"}])
+    soon = _mail(conn, uid="soon", title="Review", when="2026-08-10T09:00:00+00:00",
+                 sender=THEM)
+    _extract(conn, soon, direction="inbound",
+             deadlines=[{"what": "the review", "when": "2026-09-01"}])
+
+    report = _report(conn, process, today=date(2026, 8, 17))
+    kinds = [i.what for i in report.items if i.kind == OI.DEADLINE_NEAR]
+    assert "the survey" in kinds and "the review" in kinds
+    assert report.next_deadline == "2026-09-01"
+    assert report.as_json()["counts"]["overdue"] == 1
+
+
+# --- a condition is not a date -------------------------------------------
+
+
+def test_a_relative_phrase_does_not_become_a_date(conn, process) -> None:
+    """"14 days from receipt" was landing in the date field, where it sorted as
+    though it were a date and rendered as though it had parsed."""
+    asked = _mail(conn, uid="rel", title="Final evaluation",
+                  when="2026-04-01T09:00:00+00:00", sender=THEM)
+    _extract(conn, asked, direction="inbound", requests_of_me=[
+        {"what": "the final evaluation survey", "due": "14 days from receipt"},
+    ])
+    item = next(i for i in _report(conn, process).items if i.kind == OI.UNSATISFIED)
+    assert item.when is None
+    assert "14 days from receipt" in (item.detail or "")

@@ -39,6 +39,12 @@ OPEN_ITEMS_VERSION = 1
 # raised — a missed one is more urgent than an approaching one, not less.
 DEADLINE_HORIZON = timedelta(days=30)
 
+# A deadline this far in the past is history rather than a deadline. Recent ones
+# are still raised — a missed deadline is more urgent than an approaching one —
+# but a date from two years ago in a finished process is noise, and calling it
+# "next" is worse than not showing it.
+DEADLINE_STALE = timedelta(days=90)
+
 # A request older than this with no reply is stale rather than open: processes
 # end, and a two-year-old unanswered question is usually not a live obligation.
 STALE_AFTER = timedelta(days=365)
@@ -119,6 +125,11 @@ class OpenItemsReport:
     # this index cannot see — a web portal, a phone call — and the second means
     # it probably was not done.
     open_without_candidates: int = 0
+    # Deadlines already past, which are not "next" but are not nothing either.
+    overdue: int = 0
+    # Requests and deadlines found in attachments rather than correspondence.
+    # Reported because it is a deliberate exclusion, not an absence of data.
+    asks_skipped: int = 0
     duplicates_collapsed: int = 0
     # Settled by the user rather than by evidence. Kept out of the open list and
     # counted separately, so the header stays true.
@@ -153,6 +164,8 @@ class OpenItemsReport:
                 "documents_unread": len(self.documents_unread),
                 "documents_unexamined": len(self.documents_unexamined),
                 "open_without_candidates": self.open_without_candidates,
+                "overdue": self.overdue,
+                "asks_skipped": self.asks_skipped,
                 "duplicates_collapsed": self.duplicates_collapsed,
                 "settled_by_me": len(self.settled_items),
                 "settled_contradicted": sum(
@@ -447,10 +460,25 @@ def compute(
     rows = {
         r["id"]: r
         for r in conn.execute(
-            "SELECT id, doc_date, title, counterparty FROM docs"
+            "SELECT id, doc_date, title, counterparty, mime FROM docs"
             f" WHERE id IN ({','.join('?' * len(doc_ids))})", doc_ids
         ) if doc_ids
     } if doc_ids else {}
+
+    def is_correspondence(doc_id: int) -> bool:
+        """Whether a document is somebody writing to somebody.
+
+        Obligations are read from correspondence only, and deliberately not from
+        attachments. Measured on a real process: a photographed consular form
+        produced twelve "requests", an application-instructions document seven,
+        because both are generic checklists listing every document anyone might
+        ever need. None of it was asked of this reader in particular.
+
+        Asymmetric on purpose — the *evidence* side still uses attachments, since
+        a file I sent is exactly how I discharge an obligation.
+        """
+        row = rows.get(doc_id)
+        return bool(row) and row["mime"] == "message/rfc822"
 
     # Everything I sent or promised, in document order, as candidate fulfilments.
     provided: list[tuple[int, str]] = []
@@ -481,6 +509,8 @@ def compute(
     settled_items: list[OpenItem] = []
     requests_total = requests_satisfied = 0
     without_candidates = 0
+    # Obligations declined because their document was not correspondence.
+    asks_skipped = 0
     estimated = False
     # The same requirement restated in two documents is one obligation, not two.
     # A checklist repeated in a reminder is the common case.
@@ -500,6 +530,11 @@ def compute(
             requests = []
         else:
             requests = got.requests
+
+        if not is_correspondence(doc_id):
+            # A checklist in an attachment is not a request made of anybody.
+            asks_skipped += len(requests) + len(got.deadlines)
+            continue
 
         for entry in requests:
             requests_total += 1
@@ -542,17 +577,25 @@ def compute(
                 # Same obligation, another document: cite both rather than
                 # listing it twice.
                 existing.doc_ids.append(doc_id)
-                existing.when = existing.when or entry.get("due")
+                merged = parse_when((entry.get("due") or "").strip())
+                existing.when = existing.when or (merged.isoformat() if merged else None)
                 collapsed += 1
                 continue
 
+            # Only a real date goes in the date field. "14 days from receipt" is
+            # a condition, not a deadline, and putting it where a date belongs
+            # made it sort as though it were one and render as though it parsed.
+            due_raw = (entry.get("due") or "").strip() or None
+            due_date = parse_when(due_raw) if due_raw else None
             item = OpenItem(
                 kind=UNSATISFIED,
                 what=what,
-                when=entry.get("due"),
+                when=due_date.isoformat() if due_date else None,
                 counterparty=got.payload.get("counterparty") or (row["counterparty"] if row else None),
                 detail=(
-                    "no candidate fulfilment in the archive" if not considered
+                    # The unparsed phrase survives as prose, where it is honest.
+                    f"due {due_raw}" if due_raw and not due_date
+                    else "no candidate fulfilment in the archive" if not considered
                     else f"asked in {(row['title'] or 'a message')[:60]}"
                 ),
                 doc_ids=[doc_id],
@@ -565,6 +608,8 @@ def compute(
             when = parse_when(entry.get("when"))
             if when is None:
                 continue
+            if today - when > DEADLINE_STALE:
+                continue  # history, not a deadline
             if when - today <= DEADLINE_HORIZON:
                 items.append(OpenItem(
                     kind=DEADLINE_NEAR,
@@ -650,6 +695,11 @@ def compute(
         item.last_activity = last_activity[:10] if last_activity else None
 
     deadlines = sorted(i.when for i in items if i.kind == DEADLINE_NEAR and i.when)
+    # "Next" means the next one coming, not the earliest one on record. A date
+    # that has passed is either missed or moot, and either way it is not next;
+    # counted separately so it is still visible.
+    upcoming = [d for d in deadlines if d >= today.isoformat()]
+    overdue = len(deadlines) - len(upcoming)
 
     # Overdue first, then soonest; unsatisfied before promised, since something
     # asked of you outranks something you offered.
@@ -665,7 +715,9 @@ def compute(
         documents_considered=len(extractions),
         documents_unread=unread,
         documents_unexamined=unexamined,
-        next_deadline=deadlines[0] if deadlines else None,
+        next_deadline=upcoming[0] if upcoming else None,
+        overdue=overdue,
+        asks_skipped=asks_skipped,
         open_without_candidates=without_candidates,
         duplicates_collapsed=collapsed,
         settled_items=settled_items,

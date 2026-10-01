@@ -257,6 +257,10 @@ export interface ProcessView {
       /** Read and not understood, versus not looked at yet. Different problems. */
       documents_unread: number;
       documents_unexamined: number;
+      /** Deadlines already past: not "next", but not nothing either. */
+      overdue: number;
+      /** Obligations found in attachments rather than correspondence. */
+      asks_skipped: number;
       open_without_candidates: number;
       duplicates_collapsed: number;
     };

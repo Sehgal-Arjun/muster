@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, type ExtractJob, type OpenItem, type ProcessView } from "../api";
+import { shortDate } from "../dates";
 
 /**
  * Gather mode: the state of a process rather than a list of matches.
@@ -20,14 +21,6 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 const KIND_ORDER = ["deadline_near", "unsatisfied", "unanswered"];
-
-function shortDate(iso: string | null): string {
-  if (!iso) return "";
-  const when = new Date(iso);
-  return Number.isNaN(when.getTime())
-    ? iso.slice(0, 10)
-    : when.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
-}
 
 export function GatherView({
   slug,
@@ -236,8 +229,10 @@ export function GatherView({
             label={blind ? "not examined" : "open"}
           />
           <Stat
+            // Upcoming only. A date that has passed is either missed or moot,
+            // and either way it is not next — it is counted beside it instead.
             value={view.open_items.next_deadline ? shortDate(view.open_items.next_deadline) : "—"}
-            label="next deadline"
+            label={counts.overdue ? `next deadline · ${counts.overdue} overdue` : "next deadline"}
           />
           <Stat value={String(view.gather.size)} label="documents" />
         </div>
@@ -278,6 +273,13 @@ export function GatherView({
                   examine now (⌘E)
                 </button>
               )}
+            </div>
+          )}
+          {counts.asks_skipped > 0 && (
+            <div className="caveat">
+              {counts.asks_skipped} request{counts.asks_skipped > 1 ? "s" : ""} found in
+              attachments rather than correspondence, and not counted — a checklist
+              in a form lists what anyone might need, not what was asked of you.
             </div>
           )}
           {view.gather.seed_only > 0 && (
