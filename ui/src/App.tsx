@@ -30,6 +30,17 @@ import { ResultRow } from "./components/ResultRow";
 const USE_MOCK = import.meta.env.VITE_USE_MOCK === "1";
 
 const MODES: Mode[] = ["hybrid", "keyword", "vector"];
+/**
+ * How many matches to ask for.
+ *
+ * Ten is the server's default and the number the eval harness scores at. The
+ * list is a different thing from a benchmark: newest-first over ten rows is
+ * "the most recent of the ten best matches", which is a thinner promise than it
+ * looks. Twenty-five gives the order something to work with, and the ranker is
+ * untouched either way — this is how many of its answers to show, not how it
+ * decided them.
+ */
+const LIST_LIMIT = 25;
 const DEBOUNCE_MS = 120;
 /**
  * The panel opens far more often than mail arrives, so asking on every summon
@@ -53,6 +64,31 @@ const SERVER_START_MS = 1200;
  * about half a second to ask for again, and never the mode, which resets.
  */
 const LAST_SEARCH = "muster.lastSearch";
+
+/**
+ * How the list is ordered. Presentation, not retrieval.
+ *
+ * "rank" is what the ranker decided — the order the eval harness measures, and
+ * the only order in which the first result is a claim about relevance. "newest"
+ * re-orders those same matches by date, which is what reading a queue of mail
+ * wants: what arrived most recently, first.
+ *
+ * Worth being exact about, because the two are easy to confuse: this reorders
+ * what matched. It does not change what matched. The tenth-best match by
+ * relevance can be top of the list if it is the most recent, but an eleventh
+ * that never came back is still not there.
+ */
+const SORT_KEY = "muster.sort";
+
+type Sort = "rank" | "newest";
+
+function storedSort(): Sort {
+  try {
+    return localStorage.getItem(SORT_KEY) === "rank" ? "rank" : "newest";
+  } catch {
+    return "newest";
+  }
+}
 
 function restoreQuery(): string {
   try {
@@ -111,6 +147,7 @@ export default function App() {
    * reading mail rather than finding it actually wants.
    */
   const [layout, setLayout] = useState<Layout>(storedLayout);
+  const [sort, setSort] = useState<Sort>(storedSort);
   // When the last refresh was asked for, so summoning the panel repeatedly does
   // not mean a request each time.
   const lastRefresh = useRef(0);
@@ -206,7 +243,19 @@ export default function App() {
   // the query the user is actually looking at.
   const latest = useRef(0);
 
-  const hits = response?.results ?? [];
+  const hits = useMemo(() => {
+    const results = response?.results ?? [];
+    if (sort === "rank") return results;
+    // Stable: equal dates keep the ranker's order, so the better match of two
+    // things sent the same day is still the higher one. Undated last — a
+    // document with no date is not new, it is unknown.
+    return [...results].sort((a, b) => {
+      if (!a.date && !b.date) return a.rank - b.rank;
+      if (!a.date) return 1;
+      if (!b.date) return -1;
+      return a.date === b.date ? a.rank - b.rank : a.date < b.date ? 1 : -1;
+    });
+  }, [response, sort]);
   const reading = stack.length > 0;
   /**
    * The document the list is pointing at, for the row highlight in split mode:
@@ -228,6 +277,15 @@ export default function App() {
     storeLayout(layout);
     void applyLayout(layout);
   }, [layout]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SORT_KEY, sort);
+    } catch {
+      // Applies for this session regardless.
+    }
+    setSelected(0);
+  }, [sort]);
 
   /**
    * Take focus on every summon, not just the first.
@@ -345,7 +403,7 @@ export default function App() {
       try {
         const body = USE_MOCK
           ? mockSearchFor(q)
-          : await api.search({ q, mode, ...(override ?? {}) });
+          : await api.search({ q, mode, limit: LIST_LIMIT, ...(override ?? {}) });
         if (ticket !== latest.current) return;
         setResponse(body);
         setError(null);
@@ -357,7 +415,9 @@ export default function App() {
         if (cause instanceof ApiError && cause.code === "unreachable") {
           if (await reviveServer()) {
             try {
-              const body = await api.search({ q, mode, ...(override ?? {}) });
+              const body = await api.search({
+                q, mode, limit: LIST_LIMIT, ...(override ?? {}),
+              });
               if (ticket !== latest.current) return;
               setResponse(body);
               setError(null);
@@ -692,6 +752,9 @@ export default function App() {
       // Enter reads it here. Leaving the panel to open Gmail or Preview is the
       // failure this view exists to remove; ⌘↵ still reveals the original.
       void (meta ? reveal(current) : read(current));
+    } else if (meta && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      setSort((current) => (current === "newest" ? "rank" : "newest"));
     } else if (meta && event.key === "\\") {
       event.preventDefault();
       setLayout((current) => (current === "split" ? "stack" : "split"));
@@ -856,6 +919,7 @@ export default function App() {
       readingMail={openDoc?.mime === "message/rfc822"}
       gathering={gatherSlug !== null}
       split={split}
+      sort={sort}
       syncing={syncing}
       onDrag={beginDrag}
     />

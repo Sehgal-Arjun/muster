@@ -13,6 +13,7 @@ const SEARCH_HINTS: Array<[string, string]> = [
   ["⌘⇧F", "open folder"],
   ["⌘K", "actions"],
   ["⌘1/2/3", "mode"],
+  ["⌘S", "sort"],
   ["⌘\\", "layout"],
   ["esc", "close"],
 ];
@@ -61,6 +62,7 @@ export function Footer({
   readingMail,
   gathering,
   split,
+  sort,
   syncing,
   onDrag,
 }: {
@@ -74,6 +76,8 @@ export function Footer({
   gathering?: boolean;
   /** Two panes: the list keeps the arrows, so the hints stay the list's. */
   split?: boolean;
+  /** Named next to the mode, because it changes what "first" means. */
+  sort?: "rank" | "newest";
   syncing: boolean;
   /** The other handle for moving the panel. See beginDrag in App. */
   onDrag?: (event: MouseEvent) => void;
@@ -117,6 +121,20 @@ export function Footer({
         {syncing && <span className="syncing" title="checking for new mail" />}
         {/* Marked when it is not the default, because a single-arm mode is a
             temporary thing and looks identical to normal otherwise. */}
+        {/* Shown always: which of the two orders is in force decides whether
+            the top row is a claim about relevance or about time. */}
+        {sort && (
+          <span
+            className={`mode${sort === "newest" ? " mode-narrowed" : ""}`}
+            title={
+              sort === "newest"
+                ? "newest first — ⌘S for best match first"
+                : "best match first — ⌘S for newest first"
+            }
+          >
+            {sort === "newest" ? "newest" : "best"}
+          </span>
+        )}
         <span className={`mode${mode === "hybrid" ? "" : " mode-narrowed"}`}
               title={mode === "hybrid" ? undefined : `${mode} only — ⌘1 for hybrid`}>
           {mode}
