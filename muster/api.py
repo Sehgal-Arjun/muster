@@ -285,7 +285,7 @@ def _view_key(conn: sqlite3.Connection, process) -> str:
 
 
 def _process_view(cfg: Config, conn: sqlite3.Connection, process, *,
-                  cached_only: bool = False) -> dict:
+                  cached_only: bool = False, build: bool = True) -> dict | None:
     """A process view, computed once and shared by everything that needs one.
 
     A view built with ``cached_only`` may be partial — some pair had no cached
@@ -298,6 +298,11 @@ def _process_view(cfg: Config, conn: sqlite3.Connection, process, *,
         cached = _views.get(process.slug)
         if cached and cached["key"] == key and (cached_only or not cached["partial"]):
             return cached["payload"]
+    if not build:
+        # The caller would rather answer now with less. Reconstructing a process
+        # takes seconds on a cold server, and a screen that shows nothing for
+        # eighteen of them is indistinguishable from a screen that is broken.
+        return None
 
     payload = _build_process_view(cfg, conn, process, cached_only=cached_only)
     with _views_lock:
@@ -307,6 +312,28 @@ def _process_view(cfg: Config, conn: sqlite3.Connection, process, *,
             "partial": bool(payload["open_items"].get("estimated")),
         }
     return payload
+
+
+_warming = threading.Event()
+
+
+def _warm_views_async(cfg: Config) -> None:
+    """Fill the cache in the background, once at a time.
+
+    Called when a screen has just told the reader "still working this out": the
+    promise has been made on screen, so something has to be doing it.
+    """
+    if _warming.is_set():
+        return
+    _warming.set()
+
+    def run() -> None:
+        try:
+            _warm_views(cfg)
+        finally:
+            _warming.clear()
+
+    threading.Thread(target=run, daemon=True, name="warm-views").start()
 
 
 def _warm_views(cfg: Config) -> None:
@@ -857,11 +884,34 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
         conn = _connection(cfg)
         summaries = []
+        pending = False
         for process in processes.all_processes(conn):
             # The same payload the process screen serves, so the two can never
             # disagree about a number — and so clicking one of these lines opens
             # something already built.
-            view = _process_view(cfg, conn, process, cached_only=True)
+            #
+            # Never built here, though: this is the screen a hotkey summons, and
+            # it has to draw immediately. A process with nothing cached is listed
+            # as itself, marked as still being worked out, and filled in by the
+            # warm pass this kicks off.
+            view = _process_view(cfg, conn, process, cached_only=True, build=False)
+            if view is None:
+                pending = True
+                summaries.append({
+                    "slug": process.slug,
+                    "name": process.name,
+                    "documents": None,
+                    "anchors": len(process.anchors),
+                    "open": None,
+                    "settled_by_me": None,
+                    "awaiting_confirmation": None,
+                    "next_deadline": None,
+                    "estimated": False,
+                    "extraction_pending": None,
+                    "last_activity": None,
+                    "pending": True,
+                })
+                continue
             items = view["open_items"]
             counts = items["counts"]
             summaries.append({
@@ -883,10 +933,16 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                     (row["date"] for row in view["timeline"] if row["date"]),
                     default=None,
                 ),
+                "pending": False,
             })
 
-        # Soonest deadline first; processes with none fall to the end.
-        summaries.sort(key=lambda s: (s["next_deadline"] or "9999", -s["open"]))
+        if pending:
+            _warm_views_async(cfg)
+
+        # Soonest deadline first; processes with none fall to the end. One still
+        # being reconstructed sorts by name, since it has no deadline yet and
+        # jumping around as it arrives would be worse than being in the wrong place.
+        summaries.sort(key=lambda s: (s["next_deadline"] or "9999", -(s["open"] or 0)))
 
         state = syncstate.get(conn, "gmail")
         totals = conn.execute(
@@ -897,6 +953,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
         return {
             "processes": summaries,
+            # True while some process has not been reconstructed yet, so the
+            # panel knows to ask again rather than showing blanks forever.
+            "warming": pending or not _model_ready.is_set(),
             "index": {
                 "documents": totals["docs"] or 0,
                 "missing": totals["missing"] or 0,

@@ -654,3 +654,21 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
 /* The panel has no titlebar, so these bars are the handles. Only their own
    background drags — a mousedown on the query field belongs to the field. */
 .drag-handle { cursor: default; }
+
+/* A process the server has not reconstructed yet. Marked rather than blank: an
+   empty screen for eighteen seconds is indistinguishable from a broken one. */
+.pending-chip { color: var(--dim); border-color: var(--line); }
+.pulse {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.1s ease-in-out infinite;
+  vertical-align: middle;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}

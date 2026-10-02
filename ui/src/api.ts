@@ -276,20 +276,27 @@ export interface ProcessView {
 export interface HomeProcess {
   slug: string;
   name: string;
-  documents: number;
   anchors: number;
-  open: number;
-  settled_by_me: number;
-  awaiting_confirmation: number;
+  /**
+   * Null while the process is still being reconstructed. Named rather than
+   * counted: a zero would be a claim, and there is nothing to claim yet.
+   */
+  documents: number | null;
+  open: number | null;
+  settled_by_me: number | null;
+  awaiting_confirmation: number | null;
   next_deadline: string | null;
   /** True when some judgement was uncached, so `open` is an upper bound. */
   estimated: boolean;
-  extraction_pending: number;
+  extraction_pending: number | null;
   last_activity: string | null;
+  pending: boolean;
 }
 
 export interface HomeView {
   processes: HomeProcess[];
+  /** Some process has not been reconstructed yet: ask again shortly. */
+  warming: boolean;
   index: {
     documents: number;
     missing: number;

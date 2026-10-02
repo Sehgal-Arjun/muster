@@ -23,18 +23,37 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
   // embedding model first, and that is the wait worth naming.
   const [slow, setSlow] = useState(false);
 
+  /**
+   * Ask, and keep asking while anything is still being worked out.
+   *
+   * A cold server has to load the embedding model and reconstruct each process
+   * before it can say anything about them. The overview no longer waits for that
+   * — it lists what it knows, marks the rest, and this fills them in as they
+   * arrive, so the screen is never blank and never lies.
+   */
   useEffect(() => {
     let live = true;
-    api
-      .home()
-      .then((body) => live && setHome(body))
-      .catch((cause) =>
-        live && setError(cause instanceof ApiError ? cause.message : String(cause)),
-      );
+    let timer: number | undefined;
+
+    const ask = async () => {
+      try {
+        const body = await api.home();
+        if (!live) return;
+        setHome(body);
+        setError(null);
+        if (body.warming) timer = window.setTimeout(ask, 1200);
+      } catch (cause) {
+        if (!live) return;
+        setError(cause instanceof ApiError ? cause.message : String(cause));
+      }
+    };
+
+    void ask();
     const beat = setTimeout(() => live && setSlow(true), 1500);
     return () => {
       live = false;
       clearTimeout(beat);
+      if (timer) clearTimeout(timer);
     };
   }, []);
 
@@ -60,7 +79,7 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
   }
 
   const attention = home.processes.filter(
-    (p) => p.open > 0 || p.awaiting_confirmation > 0,
+    (p) => (p.open ?? 0) > 0 || (p.awaiting_confirmation ?? 0) > 0,
   );
 
   return (
@@ -96,19 +115,27 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
               >
                 <span className="gather-what">{process.name}</span>
 
-                {process.open > 0 && (
+                {/* Still being reconstructed: say so, rather than showing zeros
+                    that would read as "nothing outstanding". */}
+                {process.pending && (
+                  <span className="chip pending-chip">
+                    <span className="pulse" /> working it out…
+                  </span>
+                )}
+
+                {(process.open ?? 0) > 0 && (
                   <span className="chip home-open">
                     {process.open}
                     {/* An upper bound, not a count, until its judgements are made. */}
                     {process.estimated ? "+" : ""} open
                   </span>
                 )}
-                {process.awaiting_confirmation > 0 && (
+                {(process.awaiting_confirmation ?? 0) > 0 && (
                   <span className="chip contradicted">
                     {process.awaiting_confirmation} to confirm
                   </span>
                 )}
-                {process.extraction_pending > 0 && (
+                {(process.extraction_pending ?? 0) > 0 && (
                   <span className="chip contradicted">
                     {process.extraction_pending} unread
                   </span>
@@ -119,7 +146,9 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
                 >
                   {process.next_deadline ? `due ${shortDate(process.next_deadline)}` : ""}
                 </span>
-                <span className="dim home-docs">{process.documents} docs</span>
+                <span className="dim home-docs">
+                  {process.documents === null ? "" : `${process.documents} docs`}
+                </span>
               </li>
             ))}
           </ul>

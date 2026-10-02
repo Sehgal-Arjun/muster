@@ -522,6 +522,16 @@ export default function App() {
     setStack([{ kind: "doc", id: hit.doc_id }]);
   }, []);
 
+  /*
+   * ⌘\ and ⌘H are bound at the document only, never here as well.
+   *
+   * Both handlers see the same keystroke — React's runs as it bubbles to the app
+   * container, the listener runs when it reaches the document — so a key bound in
+   * both places fired twice. ⌘H survived that, being idempotent. ⌘\ toggled the
+   * layout and toggled it straight back, which looks exactly like a key that does
+   * nothing.
+   */
+
   /**
    * Back to the resting state: no query, no process, nothing open.
    *
@@ -755,12 +765,6 @@ export default function App() {
     } else if (meta && event.key.toLowerCase() === "s") {
       event.preventDefault();
       setSort((current) => (current === "newest" ? "rank" : "newest"));
-    } else if (meta && event.key === "\\") {
-      event.preventDefault();
-      setLayout((current) => (current === "split" ? "stack" : "split"));
-    } else if (meta && event.key.toLowerCase() === "h") {
-      event.preventDefault();
-      goHome();
     } else if (meta && event.key.toLowerCase() === "p") {
       event.preventDefault();
       setPicking(true);

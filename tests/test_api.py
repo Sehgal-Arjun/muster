@@ -632,7 +632,7 @@ def test_warming_sets_ready_even_when_the_model_cannot_load(cfg, monkeypatch) ->
 
 def test_home_has_the_documented_shape_with_no_processes(client) -> None:
     body = client.get("/home").json()
-    assert set(body) == {"processes", "index"}
+    assert set(body) == {"processes", "index", "warming"}
     assert body["processes"] == []
     assert set(body["index"]) == {
         "documents", "missing", "last_sync", "last_result", "embedding_ready",
@@ -640,25 +640,53 @@ def test_home_has_the_documented_shape_with_no_processes(client) -> None:
     assert body["index"]["documents"] > 0
 
 
-def test_home_summarises_a_process_without_asking_the_model(client, conn, cfg) -> None:
-    """Opening the panel must not wait on an inference — so a summary that has no
-    cached judgement to read reports an upper bound and says so."""
+def test_home_lists_a_process_it_has_not_reconstructed_yet(client, conn, cfg) -> None:
+    """A hotkey summoned this screen. Reconstructing a process takes seconds on a
+    cold server, and eighteen seconds of nothing is indistinguishable from broken —
+    so the process is listed as itself, marked as still being worked out."""
+    from muster import api as api_mod, processes
+
+    made = processes.create(conn, "Warehouse lease")
+    processes.add_anchor(conn, made.id, "domain", "example.com")
+    conn.commit()
+
+    built: list[str] = []
+    original = api_mod._build_process_view
+    api_mod._build_process_view = lambda *a, **k: built.append("x") or original(*a, **k)
+    try:
+        body = client.get("/home").json()
+    finally:
+        api_mod._build_process_view = original
+
+    summary = next(p for p in body["processes"] if p["slug"] == made.slug)
+    assert set(summary) == {
+        "slug", "name", "documents", "anchors", "open", "settled_by_me",
+        "awaiting_confirmation", "next_deadline", "estimated",
+        "extraction_pending", "last_activity", "pending",
+    }
+    assert summary["name"] == "Warehouse lease"
+    assert summary["anchors"] == 1
+    # Named, not counted, and honest about which it is.
+    assert summary["pending"] is True
+    assert summary["open"] is None
+    assert body["warming"] is True
+
+
+def test_home_reports_the_numbers_once_a_process_is_built(client, conn, cfg) -> None:
     from muster import processes
 
     made = processes.create(conn, "Warehouse lease")
     processes.add_anchor(conn, made.id, "domain", "example.com")
     conn.commit()
 
-    body = client.get("/home").json()
-    summary = next(p for p in body["processes"] if p["slug"] == made.slug)
-    assert set(summary) == {
-        "slug", "name", "documents", "anchors", "open", "settled_by_me",
-        "awaiting_confirmation", "next_deadline", "estimated",
-        "extraction_pending", "last_activity",
-    }
-    assert summary["name"] == "Warehouse lease"
-    assert summary["anchors"] == 1
-    assert summary["documents"] >= 1
+    # Opening it is what builds it; the overview then has something to report.
+    view = client.get(f"/process/{made.slug}").json()
+    summary = next(
+        p for p in client.get("/home").json()["processes"] if p["slug"] == made.slug
+    )
+    assert summary["pending"] is False
+    assert summary["documents"] == view["gather"]["size"]
+    assert summary["open"] == len(view["open_items"]["items"])
 
 
 def test_home_open_count_is_what_the_process_view_would_list(client, conn, cfg) -> None:
@@ -670,6 +698,7 @@ def test_home_open_count_is_what_the_process_view_would_list(client, conn, cfg) 
     processes.add_anchor(conn, made.id, "domain", "example.com")
     conn.commit()
 
+    client.get(f"/process/{made.slug}")     # builds it
     body = client.get("/home").json()
     summary = next(p for p in body["processes"] if p["slug"] == made.slug)
 
@@ -806,11 +835,10 @@ def with_process(client, conn):
     return made
 
 
-def test_opening_a_process_reuses_what_home_already_built(
+def test_a_second_visit_reuses_the_first_reconstruction(
     client, conn, with_process, monkeypatch
 ) -> None:
-    """The overview computes exactly what a click needs. Recomputing it because
-    somebody clicked would be the same two seconds with somebody watching."""
+    """One build per process, not one per screen that mentions it."""
     from muster import api as api_mod
 
     builds: list[str] = []
@@ -821,16 +849,26 @@ def test_opening_a_process_reuses_what_home_already_built(
         return real(cfg, conn_, process, **kwargs)
 
     monkeypatch.setattr(api_mod, "_build_process_view", counted)
+    # The warm pass is a separate thread and does build — deliberately. What is
+    # under test here is the request path, which must not.
+    warmed: list[bool] = []
+    monkeypatch.setattr(api_mod, "_warm_views_async", lambda _cfg: warmed.append(True))
 
+    # The overview never builds: it is the screen a hotkey summons.
     client.get("/home")
+    assert builds == []
+    assert warmed == [True], "home left a process pending and asked nobody to build it"
+    client.get(f"/process/{with_process.slug}")
     assert builds == [with_process.slug]
     client.get(f"/process/{with_process.slug}")
-    assert builds == [with_process.slug], "the click rebuilt what home had built"
+    client.get("/home")
+    assert builds == [with_process.slug], "something rebuilt a view it already had"
 
 
 def test_the_numbers_on_both_screens_are_the_same_object(
     client, with_process
 ) -> None:
+    client.get(f"/process/{with_process.slug}")     # builds it
     home = next(
         p for p in client.get("/home").json()["processes"]
         if p["slug"] == with_process.slug
@@ -873,7 +911,7 @@ def test_a_new_document_invalidates_the_cache(client, conn, with_process) -> Non
 
 
 def test_an_estimated_view_is_rebuilt_when_the_real_one_is_asked_for(
-    client, conn, with_process, monkeypatch
+    client, conn, cfg, with_process, monkeypatch
 ) -> None:
     """Good enough for an overview, not good enough for the screen you opened."""
     from muster import api as api_mod
@@ -891,7 +929,11 @@ def test_an_estimated_view_is_rebuilt_when_the_real_one_is_asked_for(
 
     monkeypatch.setattr(api_mod, "_build_process_view", counted)
 
-    client.get("/home")
+    # A partial build, as the background warm pass makes them.
+    from muster import processes as processes_mod
+
+    process = processes_mod.get(conn, with_process.slug)
+    api_mod._process_view(cfg, conn, process, cached_only=True)
     assert builds == [{"cached_only": True}]
     client.get(f"/process/{with_process.slug}")
     assert builds == [{"cached_only": True}, {"cached_only": False}]
