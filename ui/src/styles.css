@@ -561,6 +561,12 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
 .gather-row.settled .gather-what { opacity: 0.55; text-decoration: line-through; }
 .chip.contradicted { color: #ffcf70; border-color: rgba(255, 207, 112, 0.4); }
 
+/* Settled a moment ago: struck through where it stands, so the click is seen to
+   land. Moving the row to another section while the eye is on the old place is
+   how "done" came to look like it did nothing. */
+.gather-row.settled { opacity: 0.6; }
+.gather-row.settled .gather-what { text-decoration: line-through; }
+
 .settle {
   flex: none;
   background: none;
@@ -573,12 +579,22 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
   cursor: pointer;
   opacity: 0;
 }
-.gather-row:hover .settle, .gather-row.selected .settle { opacity: 1; }
+.gather-row:hover .settle, .gather-row.selected /* Settled a moment ago: struck through where it stands, so the click is seen to
+   land. Moving the row to another section while the eye is on the old place is
+   how "done" came to look like it did nothing. */
+.gather-row.settled { opacity: 0.6; }
+.gather-row.settled .gather-what { text-decoration: line-through; }
+
+.settle { opacity: 1; }
 .settle:hover { color: var(--fg); border-color: var(--accent); }
 
 /* Asked once, when a deadline has passed with nothing since. */
 .confirm-ask {
   flex: none;
+  background: none;
+  border: none;
+  font: inherit;
+  cursor: pointer;
   font-size: 10.5px;
   color: #ffcf70;
   padding-left: 6px;

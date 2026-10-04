@@ -38,3 +38,6 @@ ui/src-tauri/gen/
 ui/src-tauri/target/
 venv/
 worklog.md
+
+# Working notes, never committed.
+NOTES.md

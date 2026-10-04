@@ -37,13 +37,29 @@ export function GatherView({
    * keeping the list on screen is knowing where in it you are.
    */
   activeDocId?: number | null;
-  onOpenDoc: (docId: number) => void;
+  /**
+   * The item is passed along with the document so that reading it does not lose
+   * the ability to settle it: in the one-column layout this view is unmounted
+   * behind the reader, and its ⌘D goes with it.
+   */
+  onOpenDoc: (docId: number, item?: OpenItem) => void;
 }) {
   const [view, setView] = useState<ProcessView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   const [flash, setFlash] = useState<string | null>(null);
   const [job, setJob] = useState<ExtractJob | null>(null);
+  /**
+   * Items settled in the last few seconds, kept in place and struck through.
+   *
+   * Settling used to move the row into a section further down the page while the
+   * eye was still on where it had been — from which the honest reading is
+   * "pressing done did nothing". It stays where it is, visibly settled, and the
+   * refetch tidies up behind it.
+   */
+  const [justSettled, setJustSettled] = useState<Record<string, boolean>>({});
+  /** The last thing settled, for ⌘Z. */
+  const [lastSettled, setLastSettled] = useState<OpenItem | null>(null);
 
   /**
    * Settle an item by hand.
@@ -55,16 +71,38 @@ export function GatherView({
   const settle = useCallback(
     async (item: OpenItem, verdict: "done" | "not_applicable") => {
       if (!slug) return;
+      // Struck through before the round trip: the click has to land visibly, and
+      // the server has never yet disagreed about a dismissal it accepted.
+      setJustSettled((current) => ({ ...current, [item.key || item.what]: true }));
       try {
         await api.dismissItem(slug, item.what, { verdict });
-        setFlash(`Marked done — ${item.what.slice(0, 40)}`);
+        setLastSettled(item);
+        setFlash(`Settled — ${item.what.slice(0, 38)} · ⌘Z to undo`);
         setView(await api.process(slug));
       } catch (cause) {
+        setJustSettled((current) => {
+          const { [item.key || item.what]: _gone, ...rest } = current;
+          return rest;   // it did not settle, so it must not look settled
+        });
         setFlash(cause instanceof ApiError ? cause.message : String(cause));
       }
     },
     [slug],
   );
+
+  /** Put back the last thing settled. A wrong keystroke should cost one more. */
+  const undoSettle = useCallback(async () => {
+    if (!slug || !lastSettled) return;
+    try {
+      await api.dismissItem(slug, lastSettled.what, { verdict: "done", undo: true });
+      setJustSettled({});
+      setFlash(`Back on the list — ${lastSettled.what.slice(0, 38)}`);
+      setLastSettled(null);
+      setView(await api.process(slug));
+    } catch (cause) {
+      setFlash(cause instanceof ApiError ? cause.message : String(cause));
+    }
+  }, [slug, lastSettled]);
 
   /**
    * Read the documents nobody has read yet.
@@ -146,11 +184,14 @@ export function GatherView({
         event.preventDefault();
         const item = open[selected];
         if (item) void settle(item, "done");
+      } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        void undoSettle();
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [view, selected, settle, examine]);
+  }, [view, selected, settle, examine, undoSettle]);
 
   useEffect(() => {
     let live = true;
@@ -335,6 +376,7 @@ export function GatherView({
               <ItemRow
                 key={item.key || `${group.kind}-${index}`}
                 item={item}
+                settled={Boolean(justSettled[item.key || item.what])}
                 selected={items.indexOf(item) === selected}
                 onOpenDoc={onOpenDoc}
                 onSettle={(verdict) => void settle(item, verdict)}
@@ -379,19 +421,24 @@ function Stat({ value, label }: { value: string; label: string }) {
 function ItemRow({
   item,
   selected,
+  settled,
   onOpenDoc,
   onSettle,
 }: {
   item: OpenItem;
   selected: boolean;
-  onOpenDoc: (docId: number) => void;
+  /** Settled a moment ago and still in place, so the click can be seen landing. */
+  settled?: boolean;
+  onOpenDoc: (docId: number, item?: OpenItem) => void;
   onSettle: (verdict: "done" | "not_applicable") => void;
 }) {
   const overdue = item.kind === "deadline_near" && item.detail === "overdue";
   return (
     <li
-      className={`gather-row${overdue ? " overdue" : ""}${selected ? " selected" : ""}`}
-      onClick={() => item.doc_ids[0] != null && onOpenDoc(item.doc_ids[0])}
+      className={`gather-row${overdue ? " overdue" : ""}${selected ? " selected" : ""}${
+        settled ? " settled" : ""
+      }`}
+      onClick={() => item.doc_ids[0] != null && onOpenDoc(item.doc_ids[0], item)}
       title={item.detail ?? undefined}
     >
       <span className="gather-when">{item.when ? shortDate(item.when) : "—"}</span>
@@ -413,10 +460,16 @@ function ItemRow({
       {/* Asked once, when a deadline has passed with nothing since. Not
           repeated: nagging is how a list teaches somebody to stop reading it. */}
       {item.needs_confirmation && (
-        <span className="confirm-ask">
+        <button
+          className="confirm-ask"
+          onClick={(event) => {
+            event.stopPropagation();
+            onSettle("done");
+          }}
+        >
           due {item.when ? shortDate(item.when) : "then"}, nothing since{" "}
           {item.last_activity ? shortDate(item.last_activity) : "then"} — done?
-        </span>
+        </button>
       )}
     </li>
   );

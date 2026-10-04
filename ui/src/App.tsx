@@ -139,6 +139,14 @@ export default function App() {
    */
   const [gatherSlug, setGatherSlug] = useState<string | null>(null);
   const [processes, setProcesses] = useState<ProcessSummary[]>([]);
+  /**
+   * The open item whose document is being read, so ⌘D still settles it.
+   *
+   * In the one-column layout the process view is unmounted behind the reader and
+   * its key bindings go with it — so opening an item to check what it was, then
+   * pressing done, did nothing at all.
+   */
+  const [readingItem, setReadingItem] = useState<{ slug: string; what: string } | null>(null);
   const [picking, setPicking] = useState(false);
   const [syncing, setSyncing] = useState(false);
   /**
@@ -699,6 +707,25 @@ export default function App() {
    */
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
+      if (
+        (event.metaKey || event.ctrlKey)
+        && event.key.toLowerCase() === "d"
+        && readingItem
+        && stack.length > 0
+      ) {
+        // Reading the document an item came from, in the layout where the list
+        // is not on screen. Settling it here means the same thing it means there.
+        event.preventDefault();
+        const settling = readingItem;
+        void api
+          .dismissItem(settling.slug, settling.what, { verdict: "done" })
+          .then(() => {
+            setReadingItem(null);
+            setStack([]);      // back to the process, where the change shows
+          })
+          .catch(() => undefined);
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && event.key === "\\") {
         event.preventDefault();
         setLayout((current) => (current === "split" ? "stack" : "split"));
@@ -737,7 +764,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onEscape);
     return () => document.removeEventListener("keydown", onEscape);
-  }, [showActions, hide, stack.length, back, gatherSlug, picking, goHome, layout]);
+  }, [showActions, hide, stack.length, back, gatherSlug, picking, goHome, layout, readingItem]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (showActions) return;
@@ -867,8 +894,11 @@ export default function App() {
       query={query}
       // So the row you are reading stays marked in the list beside it.
       activeDocId={split ? activeDocId : null}
-      onOpenDoc={(docId) => {
+      onOpenDoc={(docId, item) => {
         listScroll.current = resultsRef.current?.scrollTop ?? 0;
+        setReadingItem(
+          item && gatherSlug ? { slug: gatherSlug, what: item.what } : null,
+        );
         setStack([{ kind: "doc", id: docId }]);
       }}
     />
