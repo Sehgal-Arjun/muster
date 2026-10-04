@@ -31,7 +31,10 @@ log = logging.getLogger(__name__)
 
 # Bump when the prompt or the schema changes. Extractions are keyed on it, so a
 # bump re-extracts rather than mixing two contracts in one table.
-EXTRACTOR_VERSION = 1
+# 2: obligations only. Version 1 counted anything phrased as an instruction —
+# optional invitations, webinar sign-ups, surveys — which is most of what an
+# institution sends and almost none of what a person owes.
+EXTRACTOR_VERSION = 2
 
 DEFAULT_MODEL = "qwen2.5:14b"
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
@@ -62,17 +65,36 @@ Return ONLY a JSON object with exactly these keys:
   "deadlines": [{{"what": string, "when": string or null}}]}}
 
 Definitions, which matter more than fluency:
-- requests_of_me: things the OTHER party asked ME to provide, send, sign or do.
+- requests_of_me: things the OTHER party requires ME to provide, send, sign or
+  do, where not doing it has a consequence. An obligation, not a suggestion.
 - things_i_sent: things I attached, enclosed or confirmed sending.
 - things_i_promised: things I said I would do or send. The inverse of
   requests_of_me — what I owe because I offered, not because I was asked.
 - deadlines: dates by which something must happen, whoever owes it.
 
+What is NOT a request of me. These are the common mistakes, in order:
+- An invitation or an offer. "Join us for a webinar", "you are welcome to
+  attend", "feel free to reach out", "if you are interested". Optional by its own
+  wording, and optional means it is not owed.
+- A call to action in bulk or marketing mail: "complete this 4-minute survey",
+  "register now", "download the app", "leave a review".
+- A list of what a form, checklist or instruction sheet says anyone might need.
+  Generic paperwork is not somebody asking this reader for something.
+- Advice, guidance or a recommendation: "consider extending", "make sure to keep
+  copies", "do not ignore your I-94", "plan travel carefully".
+- Something already provided, or a step someone else performs.
+
+A request belongs in requests_of_me only if a specific person or organisation is
+waiting on THIS reader for it. If the document would read the same sent to ten
+thousand people, it is not a request of me.
+
 Rules:
 - Use [] when there is nothing. Never invent an item to fill a field.
 - Quote the document's own wording, shortened. Do not paraphrase into new terms.
-- A marketing message, a newsletter or a receipt usually asks nothing: [] is the
-  correct and expected answer for most documents.
+- A marketing message, a newsletter or a receipt asks nothing: [] is the correct
+  and expected answer for most documents. Most documents are not to-do lists.
+- Rather than deciding a borderline case in favour of including it, leave it out.
+  A list of twelve things, nine of which are not owed, is not read at all.
 - direction is "outbound" when I wrote it, "inbound" when I received it.
 
 I am {owner}.

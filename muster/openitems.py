@@ -125,6 +125,9 @@ class OpenItemsReport:
     # this index cannot see — a web portal, a phone call — and the second means
     # it probably was not done.
     open_without_candidates: int = 0
+    # Asked for, but not owed: invitations, surveys, advice. Counted rather than
+    # hidden, because a filter nobody can see is indistinguishable from a bug.
+    not_obliged: int = 0
     # Deadlines already past, which are not "next" but are not nothing either.
     overdue: int = 0
     # Requests and deadlines found in attachments rather than correspondence.
@@ -164,6 +167,7 @@ class OpenItemsReport:
                 "documents_unread": len(self.documents_unread),
                 "documents_unexamined": len(self.documents_unexamined),
                 "open_without_candidates": self.open_without_candidates,
+                "not_obliged": self.not_obliged,
                 "overdue": self.overdue,
                 "asks_skipped": self.asks_skipped,
                 "duplicates_collapsed": self.duplicates_collapsed,
@@ -433,7 +437,7 @@ def compute(
     cached_only: bool = False,
 ) -> OpenItemsReport:
     """Open items for a gathered process. A set difference, not a summary."""
-    from muster import extraction
+    from muster import extraction, obligations
 
     today = today or datetime.now(UTC).date()
     doc_ids = list(result.doc_ids)
@@ -511,6 +515,8 @@ def compute(
     without_candidates = 0
     # Obligations declined because their document was not correspondence.
     asks_skipped = 0
+    # Requests the model judged to be invitations, advice or marketing.
+    not_obliged = 0
     estimated = False
     # The same requirement restated in two documents is one obligation, not two.
     # A checklist repeated in a reminder is the common case.
@@ -537,8 +543,23 @@ def compute(
             continue
 
         for entry in requests:
-            requests_total += 1
             what = entry["what"]
+            # Being asked is not being obliged. An institution's mail is mostly
+            # invitations and advice in the imperative, and a list where most
+            # entries are not owed stops being read.
+            try:
+                obliged, _why = obligations.is_obligation(
+                    conn, what, context=(row["title"] if row else "") or "",
+                    model=model, ask=ask, cached_only=cached_only,
+                )
+            except obligations.Uncached:
+                estimated = True
+                obliged = True      # kept, and the report says the count is soft
+            if not obliged:
+                not_obliged += 1
+                continue
+
+            requests_total += 1
             # Only things provided *after* the request can satisfy it. Order is
             # why gather is chronological: a receipt from last year does not
             # answer a question asked this morning.
@@ -719,6 +740,7 @@ def compute(
         overdue=overdue,
         asks_skipped=asks_skipped,
         open_without_candidates=without_candidates,
+        not_obliged=not_obliged,
         duplicates_collapsed=collapsed,
         settled_items=settled_items,
         estimated=estimated,

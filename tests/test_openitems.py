@@ -68,9 +68,17 @@ def process(conn):
     return processes.get(conn, made.slug)
 
 
+def _answer(prompt, _model=None):
+    """Two different questions reach the model, so the double has to tell them
+    apart: is this owed at all, and does this thing satisfy that one."""
+    if "oblige" in prompt.lower():
+        return '{"obliged": true}'
+    return '{"satisfied": false}'
+
+
 def _report(conn, process, today=date(2026, 5, 1)):
     return OI.compute(conn, G.gather(conn, process), model="test-model",
-                      today=today, ask=lambda _p, _m: '{"satisfied": false}')
+                      today=today, ask=_answer)
 
 
 # --- the arithmetic --------------------------------------------------------
@@ -98,7 +106,7 @@ def test_a_request_with_a_matching_fulfilment_is_closed(conn, process) -> None:
              things_i_sent=[{"what": "proof of insurance certificate", "doc_ref": None}])
 
     report = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": true}')
+                        today=date(2026, 5, 1), ask=lambda p, _m: '{"obliged": true}' if 'oblige' in p.lower() else '{"satisfied": true}')
     assert report.requests_satisfied == 1
     assert [i for i in report.items if i.kind == OI.UNSATISFIED] == []
 
@@ -116,7 +124,7 @@ def test_a_fulfilment_before_the_request_does_not_count(conn, process) -> None:
              requests_of_me=[{"what": "proof of insurance", "due": None}])
 
     report = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": true}')
+                        today=date(2026, 5, 1), ask=lambda p, _m: '{"obliged": true}' if 'oblige' in p.lower() else '{"satisfied": true}')
     assert report.requests_satisfied == 0
 
 
@@ -293,13 +301,13 @@ def _dismissable(conn, process):
 def test_a_dismissed_item_leaves_the_open_list(conn, process) -> None:
     _dismissable(conn, process)
     before = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        today=date(2026, 5, 1), ask=_answer,
                         process_id=process.id)
     assert len(before.items) == 1
 
     OI.dismiss(conn, process.id, "the portal declaration", known_docs=before.documents_considered)
     after = OI.compute(conn, G.gather(conn, process), model="test-model",
-                       today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                       today=date(2026, 5, 1), ask=_answer,
                        process_id=process.id)
     assert after.items == []
     assert len(after.settled_items) == 1
@@ -311,7 +319,7 @@ def test_a_dismissal_is_evidence_not_a_delete(conn, process) -> None:
     _dismissable(conn, process)
     OI.dismiss(conn, process.id, "the portal declaration")
     report = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        today=date(2026, 5, 1), ask=_answer,
                         process_id=process.id)
     settled = report.settled_items[0]
     assert settled.settled_at, "no date was recorded"
@@ -327,7 +335,7 @@ def test_settling_one_wording_settles_the_restatement(conn, process) -> None:
                  requests_of_me=[{"what": "a copy of your passport", "due": None}])
     OI.dismiss(conn, process.id, "copy of the passport")   # different wording
     report = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        today=date(2026, 5, 1), ask=_answer,
                         process_id=process.id)
     assert report.items == []
 
@@ -344,7 +352,7 @@ def test_new_documents_mark_a_dismissal_as_contradicted(conn, process) -> None:
         _extract(conn, extra, direction="inbound")
 
     report = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        today=date(2026, 5, 1), ask=_answer,
                         process_id=process.id)
     assert report.settled_items[0].contradicted is True
 
@@ -354,7 +362,7 @@ def test_undismissing_returns_it_to_the_open_list(conn, process) -> None:
     OI.dismiss(conn, process.id, "the portal declaration")
     assert OI.undismiss(conn, process.id, "the portal declaration") is True
     report = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        today=date(2026, 5, 1), ask=_answer,
                         process_id=process.id)
     assert len(report.items) == 1
 
@@ -368,7 +376,7 @@ def test_a_passed_deadline_with_no_activity_asks_once(conn, process) -> None:
              requests_of_me=[{"what": "the signed agreement", "due": "2026-04-17"}])
 
     report = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        today=date(2026, 5, 1), ask=_answer,
                         process_id=process.id)
     item = next(i for i in report.items if i.kind == OI.UNSATISFIED)
     assert item.needs_confirmation is True
@@ -386,7 +394,7 @@ def test_a_deadline_that_the_process_moved_past_does_not_ask(conn, process) -> N
     _extract(conn, later, direction="inbound")
 
     report = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        today=date(2026, 5, 1), ask=_answer,
                         process_id=process.id)
     item = next(i for i in report.items if i.kind == OI.UNSATISFIED)
     assert item.needs_confirmation is False
@@ -398,7 +406,7 @@ def test_a_future_deadline_is_not_asked_about(conn, process) -> None:
     _extract(conn, asked, direction="inbound",
              requests_of_me=[{"what": "the form", "due": "2026-06-30"}])
     report = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": false}',
+                        today=date(2026, 5, 1), ask=_answer,
                         process_id=process.id)
     assert all(not i.needs_confirmation for i in report.items)
 
@@ -440,11 +448,11 @@ def test_an_uncached_pair_counts_as_open_so_the_number_is_an_upper_bound(
              things_i_sent=[{"what": "proof of insurance certificate", "doc_ref": None}])
 
     cached = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": true}',
+                        today=date(2026, 5, 1), ask=lambda p, _m: '{"obliged": true}' if 'oblige' in p.lower() else '{"satisfied": true}',
                         process_id=process.id, cached_only=True)
     # Warm the judgement, then ask again with the model forbidden.
     OI.compute(conn, G.gather(conn, process), model="test-model",
-               today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": true}',
+               today=date(2026, 5, 1), ask=lambda p, _m: '{"obliged": true}' if 'oblige' in p.lower() else '{"satisfied": true}',
                process_id=process.id)
     warm = OI.compute(conn, G.gather(conn, process), model="test-model",
                       today=date(2026, 5, 1),
@@ -462,6 +470,10 @@ def test_nothing_to_judge_is_not_an_estimate(conn, process) -> None:
                   when="2026-04-01T09:00:00+00:00", sender=THEM)
     _extract(conn, asked, direction="inbound",
              requests_of_me=[{"what": "proof of insurance", "due": None}])
+    # Whether it is owed is itself a judgement, so make it once and cache it.
+    OI.compute(conn, G.gather(conn, process), model="test-model",
+               today=date(2026, 5, 1), ask=_answer, process_id=process.id)
+
     report = OI.compute(conn, G.gather(conn, process), model="test-model",
                         today=date(2026, 5, 1),
                         ask=lambda _p, _m: (_ for _ in ()).throw(AssertionError("asked")),
@@ -523,7 +535,7 @@ def test_an_attachment_still_counts_as_evidence(conn, process) -> None:
     conn.commit()
 
     report = OI.compute(conn, G.gather(conn, process), model="test-model",
-                        today=date(2026, 5, 1), ask=lambda _p, _m: '{"satisfied": true}')
+                        today=date(2026, 5, 1), ask=lambda p, _m: '{"obliged": true}' if 'oblige' in p.lower() else '{"satisfied": true}')
     assert report.requests_satisfied == 1
 
 
@@ -574,3 +586,83 @@ def test_a_relative_phrase_does_not_become_a_date(conn, process) -> None:
     item = next(i for i in _report(conn, process).items if i.kind == OI.UNSATISFIED)
     assert item.when is None
     assert "14 days from receipt" in (item.detail or "")
+
+
+
+# --- being asked is not being obliged ------------------------------------
+
+
+def test_an_invitation_is_not_an_open_item(conn, process) -> None:
+    """"Attend this optional meeting if you want to" is not a to-do, and a list
+    where most entries are not owed stops being read."""
+    invite = _mail(conn, uid="invite", title="You're invited",
+                   when="2026-04-01T09:00:00+00:00", sender=THEM)
+    _extract(conn, invite, direction="inbound", requests_of_me=[
+        {"what": "join us for an optional virtual meet and greet", "due": None},
+    ])
+
+    def judge(prompt, _model=None):
+        if "oblige" in prompt.lower():
+            return '{"obliged": false, "reason": "optional invitation"}'
+        return '{"satisfied": false}'
+
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=judge)
+    assert report.items == []
+    # Filtered, not vanished: a filter nobody can see is indistinguishable from
+    # a bug, and this one is a judgement that can be wrong.
+    assert report.as_json()["counts"]["not_obliged"] == 1
+    assert report.requests_total == 0
+
+
+def test_an_unanswerable_request_stays_on_the_list(conn, process) -> None:
+    """A missed obligation is a worse error than a tolerated suggestion."""
+    asked = _mail(conn, uid="ask", title="Send the form",
+                  when="2026-04-01T09:00:00+00:00", sender=THEM)
+    _extract(conn, asked, direction="inbound",
+             requests_of_me=[{"what": "the signed form", "due": None}])
+
+    def broken(prompt, _model=None):
+        if "oblige" in prompt.lower():
+            return "not json at all"
+        return '{"satisfied": false}'
+
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=broken)
+    assert [i.what for i in report.items] == ["the signed form"]
+
+
+def test_a_reply_that_does_not_answer_is_not_a_no(conn, process) -> None:
+    asked = _mail(conn, uid="ask", title="Send the form",
+                  when="2026-04-01T09:00:00+00:00", sender=THEM)
+    _extract(conn, asked, direction="inbound",
+             requests_of_me=[{"what": "the signed form", "due": None}])
+
+    def silent(prompt, _model=None):
+        return "{}" if "oblige" in prompt.lower() else '{"satisfied": false}'
+
+    report = OI.compute(conn, G.gather(conn, process), model="test-model",
+                        today=date(2026, 5, 1), ask=silent)
+    assert len(report.items) == 1
+
+
+def test_the_judgement_is_cached_and_asked_once(conn, process) -> None:
+    for i in range(2):
+        asked = _mail(conn, uid=f"ask{i}", title="Send the form",
+                      when=f"2026-04-0{i + 1}T09:00:00+00:00", sender=THEM)
+        _extract(conn, asked, direction="inbound",
+                 requests_of_me=[{"what": "the signed form", "due": None}])
+
+    asked_prompts: list[str] = []
+
+    def counting(prompt, _model=None):
+        asked_prompts.append(prompt)
+        if "oblige" in prompt.lower():
+            return '{"obliged": true}'
+        return '{"satisfied": false}'
+
+    for _ in range(2):
+        OI.compute(conn, G.gather(conn, process), model="test-model",
+                   today=date(2026, 5, 1), ask=counting)
+    obligation_calls = [p for p in asked_prompts if "oblige" in p.lower()]
+    assert len(obligation_calls) == 1, "the same wording was judged more than once"
