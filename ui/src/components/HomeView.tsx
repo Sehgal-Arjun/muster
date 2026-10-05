@@ -22,6 +22,12 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
   // before it would be worse than nothing. A cold server has to load the
   // embedding model first, and that is the wait worth naming.
   const [slow, setSlow] = useState(false);
+  /**
+   * Keyboard selection. The panel is summoned by a hotkey and driven by keys;
+   * a screen whose only way in is the mouse is the one place that stops being
+   * true, and it was the first screen you see.
+   */
+  const [selected, setSelected] = useState(0);
 
   /**
    * Ask, and keep asking while anything is still being worked out.
@@ -56,6 +62,29 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
       if (timer) clearTimeout(timer);
     };
   }, []);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const rows = home?.processes ?? [];
+      if (!rows.length) return;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSelected((i) => Math.min(i + 1, rows.length - 1));
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSelected((i) => Math.max(i - 1, 0));
+      } else if (event.key === "Enter") {
+        const row = rows[selected];
+        // A process still being reconstructed has nothing to show yet, and
+        // opening an empty screen is not an answer to a keystroke.
+        if (!row || row.pending) return;
+        event.preventDefault();
+        onOpenProcess(row.slug);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [home, selected, onOpenProcess]);
 
   if (error) {
     return (
@@ -107,10 +136,10 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
               : `Processes · ${home.processes.length}`}
           </div>
           <ul className="gather-items">
-            {home.processes.map((process) => (
+            {home.processes.map((process, index) => (
               <li
                 key={process.slug}
-                className="gather-row home-row"
+                className={`gather-row home-row${index === selected ? " selected" : ""}`}
                 onClick={() => onOpenProcess(process.slug)}
               >
                 <span className="gather-what">{process.name}</span>

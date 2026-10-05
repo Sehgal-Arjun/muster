@@ -328,6 +328,74 @@ def check_server(report: Report) -> None:
                    "muster serve   (or packaging/install.sh to run it at login)")
 
 
+def check_extraction_version(conn: sqlite3.Connection, cfg: Config, report: Report) -> None:
+    """Documents read by an older extractor than the one in force.
+
+    Bumping the extractor version is how its output gets corrected, and it makes
+    every earlier reading invisible — deliberately. What is not deliberate is
+    forgetting to re-run it, at which point a process quietly reports nothing
+    outstanding because nothing has been read at the current version.
+    """
+    from muster import extraction
+
+    current = extraction.EXTRACTOR_VERSION
+    stale = _scalar(
+        conn,
+        "SELECT count(DISTINCT doc_id) FROM doc_extractions WHERE extractor_version < ?",
+        current,
+    )
+    fresh = _scalar(
+        conn,
+        "SELECT count(DISTINCT doc_id) FROM doc_extractions WHERE extractor_version = ?",
+        current,
+    )
+    if not stale and not fresh:
+        report.add("extraction", OK, "nothing extracted yet", None)
+    elif stale and not fresh:
+        report.add(
+            "extraction", WARN,
+            f"{stale} document(s) read at an older version; none at v{current} — "
+            "every process will report as unexamined",
+            "muster process extract <slug>",
+        )
+    elif stale:
+        report.add(
+            "extraction", WARN,
+            f"{fresh} document(s) at v{current}, {stale} still only at an older version",
+            "muster process extract <slug>",
+        )
+    else:
+        report.add("extraction", OK, f"{fresh} document(s) read at v{current}")
+
+
+def check_judgement_caches(conn: sqlite3.Connection, cfg: Config, report: Report) -> None:
+    """The two caches that keep open items a query rather than a generation.
+
+    Both are answers to questions asked of a model, and both are worthless if
+    they were recorded against a model that is no longer in use — the numbers
+    stay correct, but every screen pays the full cost again.
+    """
+    from muster import obligations
+
+    model = cfg.extract.model_id
+    judged = _scalar(conn, "SELECT count(*) FROM satisfaction WHERE model_id = ?", model)
+    other = _scalar(conn, "SELECT count(*) FROM satisfaction WHERE model_id != ?", model)
+    obliged = _scalar(
+        conn,
+        "SELECT count(*) FROM obligations WHERE model_id = ? AND version = ?",
+        model, obligations.OBLIGATION_VERSION,
+    )
+    detail = f"{judged} match(es) and {obliged} obligation(s) cached for {model}"
+    if other:
+        report.add(
+            "judgement cache", WARN,
+            f"{detail}; {other} recorded against a different model and unusable",
+            "harmless, but they will never be read again",
+        )
+    else:
+        report.add("judgement cache", OK, detail)
+
+
 def run(cfg: Config, conn: sqlite3.Connection) -> Report:
     """Every check, in the order a reader wants them."""
     report = Report()
@@ -342,5 +410,7 @@ def run(cfg: Config, conn: sqlite3.Connection) -> Report:
     check_schedule(report)
     check_paused(cfg, report)
     check_stale_lock(cfg, report)
+    check_extraction_version(conn, cfg, report)
+    check_judgement_caches(conn, cfg, report)
     check_server(report)
     return report

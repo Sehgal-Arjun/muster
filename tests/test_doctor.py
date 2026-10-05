@@ -199,3 +199,57 @@ def test_the_report_ranks_its_own_severity() -> None:
     report.add("c", doctor.FAIL, "bad")
     assert report.worst == doctor.FAIL
     assert [f.name for f in report.problems] == ["b", "c"]
+
+
+# --- extraction version drift ---------------------------------------------
+
+
+def _extraction_row(conn, doc_id: int, version: int) -> None:
+    conn.execute(
+        "INSERT INTO docs (id, source, source_uid, content_hash, mime, doc_date,"
+        " date_source, ingested_at, title) VALUES (?, 'gmail', ?, ?, 'message/rfc822',"
+        " '2026-01-01T00:00:00+00:00', 'header', '2026-01-01', 'x')",
+        (doc_id, f"uid-{doc_id}", f"h{doc_id}"),
+    )
+    conn.execute(
+        "INSERT INTO doc_extractions (doc_id, extractor_version, model_id, payload,"
+        " created_at) VALUES (?, ?, 'test-model', '{}', '2026-01-01')",
+        (doc_id, version),
+    )
+    conn.commit()
+
+
+def test_nothing_read_at_the_current_version_is_a_warning(conn, cfg) -> None:
+    """Bumping the extractor makes every earlier reading invisible, by design.
+    Forgetting to re-run it leaves every process reporting nothing outstanding."""
+    from muster import extraction
+
+    _extraction_row(conn, 1, extraction.EXTRACTOR_VERSION - 1)
+    report = doctor.Report()
+    doctor.check_extraction_version(conn, cfg, report)
+    finding = _findings(report, "extraction")
+    assert finding.status == doctor.WARN
+    assert "unexamined" in finding.detail
+
+
+def test_everything_read_at_the_current_version_is_fine(conn, cfg) -> None:
+    from muster import extraction
+
+    _extraction_row(conn, 1, extraction.EXTRACTOR_VERSION)
+    report = doctor.Report()
+    doctor.check_extraction_version(conn, cfg, report)
+    assert _findings(report, "extraction").status == doctor.OK
+
+
+def test_a_cache_recorded_against_another_model_is_reported(conn, cfg) -> None:
+    """The numbers stay correct; every screen just pays the full cost again."""
+    conn.execute(
+        "INSERT INTO satisfaction (request_key, candidate_key, model_id, satisfied,"
+        " created_at) VALUES ('a', 'b', 'some-other-model', 1, '2026-01-01')"
+    )
+    conn.commit()
+    report = doctor.Report()
+    doctor.check_judgement_caches(conn, cfg, report)
+    finding = _findings(report, "judgement cache")
+    assert finding.status == doctor.WARN
+    assert "different model" in finding.detail
