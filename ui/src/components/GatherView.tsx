@@ -316,6 +316,13 @@ export function GatherView({
               )}
             </div>
           )}
+          {counts.not_obliged > 0 && (
+            <div className="caveat">
+              {counts.not_obliged} request{counts.not_obliged > 1 ? "s" : ""} left out as
+              not owed — invitations, surveys and advice phrased as instructions. Being
+              asked is not being obliged, and this is a judgement, so it can be wrong.
+            </div>
+          )}
           {counts.asks_skipped > 0 && (
             <div className="caveat">
               {counts.asks_skipped} request{counts.asks_skipped > 1 ? "s" : ""} found in

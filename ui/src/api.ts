@@ -261,6 +261,8 @@ export interface ProcessView {
       overdue: number;
       /** Obligations found in attachments rather than correspondence. */
       asks_skipped: number;
+      /** Asked for, but judged not owed: invitations, surveys, advice. */
+      not_obliged: number;
       open_without_candidates: number;
       duplicates_collapsed: number;
     };

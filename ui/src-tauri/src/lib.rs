@@ -22,6 +22,64 @@ use tauri::{Emitter, Manager};
 /// keeps the middle of the window where the middle of the window was.
 static PLACED: AtomicBool = AtomicBool::new(false);
 
+/// Where the panel was left, across launches.
+///
+/// A window you positioned and then found back in the middle of the screen after
+/// a restart has not really been positioned. One file, two numbers, written when
+/// the panel hides — which is the moment the position stops changing.
+#[cfg(target_os = "macos")]
+fn placement_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        std::path::Path::new(&home).join(".muster").join("panel.json")
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn remember_placement(app: &tauri::AppHandle) {
+    if !PLACED.load(Ordering::Relaxed) {
+        return;    // never moved: centring on the next summon is still right
+    }
+    let (Some(path), Some(window)) = (placement_path(), app.get_webview_window(PANEL))
+    else {
+        return;
+    };
+    let Ok(position) = window.outer_position() else { return };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let at = position.to_logical::<f64>(scale);
+    let _ = std::fs::write(path, format!("{{\"x\": {}, \"y\": {}}}", at.x, at.y));
+}
+
+#[cfg(target_os = "macos")]
+fn restore_placement(app: &tauri::AppHandle) {
+    let (Some(path), Some(window)) = (placement_path(), app.get_webview_window(PANEL))
+    else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    if let Some((x, y)) = parse_placement(&text) {
+        PLACED.store(true, Ordering::Relaxed);
+        let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+    }
+}
+/// The two numbers out of the placement file.
+///
+/// Hand-rolled rather than reaching for a JSON crate to read two floats — and
+/// pure, because hand-rolled parsing is exactly the sort of thing that fails
+/// silently and leaves a window quietly refusing to go where it was put.
+fn parse_placement(text: &str) -> Option<(f64, f64)> {
+    fn number(text: &str, key: &str) -> Option<f64> {
+        let start = text.find(key)? + key.len();
+        let rest = text[start..].trim_start();
+        let rest = rest.strip_prefix(':')?.trim_start();
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '-' && c != '.')
+            .unwrap_or(rest.len());
+        rest[..end].parse().ok()
+    }
+    Some((number(text, "\"x\"")?, number(text, "\"y\"")?))
+}
+
+
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{
     tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt,
@@ -234,6 +292,9 @@ fn set_layout(app: tauri::AppHandle, wide: bool) {
 
 #[cfg(target_os = "macos")]
 fn hide(app: &tauri::AppHandle) {
+    // Recorded on the way out: hiding is the moment the position stops changing,
+    // and the panel is hidden far more often than the app is quit.
+    remember_placement(app);
     on_main(app, |panel| panel.hide());
 }
 
@@ -345,6 +406,9 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             build_panel(app.handle())?;
+            // Put it back where it was left, if it was ever moved.
+            #[cfg(target_os = "macos")]
+            restore_placement(app.handle());
             register_hotkey(app.handle())?;
             Ok(())
         })
@@ -473,6 +537,24 @@ mod tests {
         let on_second = centred_origin((1512.0, 0.0), (1920.0, 1080.0), (1180.0, 700.0));
         assert_eq!(on_second.0, 1512.0 + 370.0);
         assert_eq!(on_second.1, 190.0);
+    }
+
+    #[test]
+    fn a_placement_file_round_trips() {
+        assert_eq!(
+            super::parse_placement("{\"x\": 412.5, \"y\": -18}"),
+            Some((412.5, -18.0))
+        );
+        // A second display to the left gives negative coordinates, which is not
+        // an error and must not be read as one.
+        assert_eq!(super::parse_placement("{\"x\": -1512, \"y\": 0}"), Some((-1512.0, 0.0)));
+    }
+
+    #[test]
+    fn a_damaged_placement_file_is_ignored_rather_than_guessed() {
+        assert_eq!(super::parse_placement(""), None);
+        assert_eq!(super::parse_placement("{\"x\": 10}"), None);
+        assert_eq!(super::parse_placement("{\"x\": abc, \"y\": 3}"), None);
     }
 
     #[test]

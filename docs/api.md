@@ -464,6 +464,16 @@ documents it came from.
 Three counts exist to stop the report being confidently wrong:
 
 - `documents_unaccounted` — documents in the set the extractor could not read.
+- `documents_unread` / `documents_unexamined` — attempted and failed, versus never
+  attempted. One is a broken document, the other is unfinished work.
+- `overdue` — deadlines already past. Not `next_deadline`, which is the next one
+  *coming*; a date that has gone is either missed or moot.
+- `asks_skipped` — obligations found in attachments rather than correspondence,
+  and declined. A photographed consular form lists every document anyone might
+  need; none of it was asked of this reader.
+- `not_obliged` — requests judged to be invitations, surveys or advice rather than
+  obligations. Reported because it is a filter, and a filter nobody can see is
+  indistinguishable from a bug.
   Reported, never silently omitted.
 - `open_without_candidates` — open items for which the archive holds *no*
   plausible fulfilment, as against ones checked and rejected. On a real process
