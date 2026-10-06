@@ -515,8 +515,11 @@ def compute(
     without_candidates = 0
     # Obligations declined because their document was not correspondence.
     asks_skipped = 0
-    # Requests the model judged to be invitations, advice or marketing.
-    not_obliged = 0
+    # Requests judged to be invitations, advice or marketing. Counted by distinct
+    # wording rather than by occurrence: the same newsletter line appearing in
+    # six documents is one thing left out, not six, and a caveat that overstates
+    # itself is as misleading as one that hides.
+    not_obliged: set[str] = set()
     estimated = False
     # The same requirement restated in two documents is one obligation, not two.
     # A checklist repeated in a reminder is the common case.
@@ -556,7 +559,7 @@ def compute(
                 estimated = True
                 obliged = True      # kept, and the report says the count is soft
             if not obliged:
-                not_obliged += 1
+                not_obliged.add(" ".join(sorted(_tokens(what))) or what.strip().lower())
                 continue
 
             requests_total += 1
@@ -740,7 +743,7 @@ def compute(
         overdue=overdue,
         asks_skipped=asks_skipped,
         open_without_candidates=without_candidates,
-        not_obliged=not_obliged,
+        not_obliged=len(not_obliged),
         duplicates_collapsed=collapsed,
         settled_items=settled_items,
         estimated=estimated,
