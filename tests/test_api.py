@@ -937,3 +937,24 @@ def test_an_estimated_view_is_rebuilt_when_the_real_one_is_asked_for(
     assert builds == [{"cached_only": True}]
     client.get(f"/process/{with_process.slug}")
     assert builds == [{"cached_only": True}, {"cached_only": False}]
+
+
+def test_a_running_extraction_can_be_found_by_a_panel_that_did_not_start_it(
+    client,
+) -> None:
+    """A job runs for half an hour and outlives the panel that started it."""
+    from muster import api as api_mod
+
+    assert client.get("/extract/current").json() == {"job": None}
+    api_mod._extract_jobs["extract-live"] = {
+        "id": "extract-live", "process": "warehouse-lease", "state": "running",
+        "done": 4, "total": 30, "extracted": 4, "failed": 0,
+        "error": None, "stopping": False,
+    }
+    try:
+        body = client.get("/extract/current").json()["job"]
+        assert body["process"] == "warehouse-lease"
+        assert body["done"] == 4
+        assert "stopping" not in body
+    finally:
+        api_mod._extract_jobs.clear()

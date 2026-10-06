@@ -193,6 +193,27 @@ export function GatherView({
     return () => document.removeEventListener("keydown", onKey);
   }, [view, selected, settle, examine, undoSettle]);
 
+  /**
+   * Adopt an extraction already in flight.
+   *
+   * A job runs for half an hour and outlives the panel that started it, so a
+   * process being read right now would otherwise look merely empty to a panel
+   * that was reopened — or to the other layout.
+   */
+  useEffect(() => {
+    if (!slug || job) return;
+    let live = true;
+    api
+      .runningExtract()
+      .then((body) => {
+        if (live && body.job && body.job.process === slug) setJob(body.job);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [slug, job]);
+
   useEffect(() => {
     let live = true;
     setView(null);

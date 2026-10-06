@@ -850,6 +850,22 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         with _extract_lock:
             return {**_job_view(_extract_jobs[job_id]), "started": True}
 
+    @app.get("/extract/current")
+    def extract_current() -> dict:
+        """The extraction in flight, if there is one.
+
+        A job outlives the panel that started it — it runs for half an hour — and
+        a process that is being read right now should not look merely empty to a
+        panel that was reopened, or to a second one.
+
+        Deliberately not under /process: "extract" would match the {slug} route.
+        """
+        with _extract_lock:
+            running = next(
+                (j for j in _extract_jobs.values() if j["state"] == "running"), None
+            )
+            return {"job": _job_view(running) if running else None}
+
     @app.get("/process/extract/{job_id}")
     def process_extract_job(job_id: str) -> dict:
         with _extract_lock:

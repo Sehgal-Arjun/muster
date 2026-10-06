@@ -423,6 +423,7 @@ export const api = {
 
   home: () => get<HomeView>("/home"),
   extract: (slug: string) => post<ExtractJob>(`/process/${encodeURIComponent(slug)}/extract`),
+  runningExtract: () => get<{ job: ExtractJob | null }>("/extract/current"),
   extractJob: (job: string) => get<ExtractJob>(`/process/extract/${encodeURIComponent(job)}`),
   stopExtract: (job: string) =>
     post<ExtractJob>(`/process/extract/${encodeURIComponent(job)}/stop`),
