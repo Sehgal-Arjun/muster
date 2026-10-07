@@ -27,7 +27,9 @@ log = logging.getLogger(__name__)
 
 # 1: the first wording of the question. Bump when the prompt changes, since a
 # different prompt is a different question and the old answers are not to it.
-OBLIGATION_VERSION = 1
+# 2: conditionals. "Contact us if your form is lost" is owed only by someone
+# whose form is lost, and a list cannot know that. Version 1 kept them all.
+OBLIGATION_VERSION = 2
 
 PROMPT = """Does this oblige the reader to do something?
 
@@ -46,6 +48,11 @@ Answer NO for:
   "keep copies", "do not ignore"
 - generic instructions, or a line from a checklist of what anyone might need
 - anything already done, or a step somebody else performs
+- anything conditional on a circumstance that may not apply — "if your form is
+  lost", "if you plan to travel", "should you need an extension". Owed only by
+  someone in that situation, and this list cannot know whether the reader is.
+- an event happening, as opposed to something the reader must do about it: "the
+  new rule takes effect", "the office closes on Friday"
 
 Return ONLY {{"obliged": true or false, "reason": "<six words>"}}."""
 
