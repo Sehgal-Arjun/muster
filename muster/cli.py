@@ -407,7 +407,7 @@ def process_anchor(
 
 @process_app.command("extract")
 def process_extract(
-    slug: Annotated[str, typer.Argument(help="Process slug.")],
+    slug: Annotated[str, typer.Argument(help="Process slug, or 'all'.")],
     model: Annotated[str | None, typer.Option("--model", help="Ollama model id.")] = None,
     limit: Annotated[int, typer.Option("--limit", help="Stop after N documents.")] = 0,
 ) -> None:
@@ -417,6 +417,20 @@ def process_extract(
 
     cfg, conn = _open_db()
     try:
+        # "all" because bumping the extractor version invalidates every reading
+        # at once, and doing that then re-running it one process at a time is a
+        # step nobody should have to remember.
+        if slug == "all":
+            todo_all = processes.all_processes(conn)
+            if not todo_all:
+                typer.echo("no processes")
+                return
+            conn.close()
+            for each in todo_all:
+                typer.echo(f"\n{each.name} ({each.slug})")
+                process_extract(each.slug, model=model, limit=limit)
+            return
+
         process = processes.get(conn, slug)
         if process is None:
             typer.echo(f"no process {slug!r}", err=True)

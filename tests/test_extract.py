@@ -35,3 +35,29 @@ def test_html_extraction_falls_back_rather_than_indexing_nothing(monkeypatch) ->
     monkeypatch.setattr("muster.htmltext.html_to_text", boom)
     out = extract_module.extract_text(b"<p>hello there</p>", "text/html", "x.html")
     assert "hello there" in out
+
+
+def test_extract_all_visits_every_process(conn, cfg, monkeypatch) -> None:
+    """Bumping the extractor invalidates every reading at once; re-running it one
+    process at a time is a step nobody should have to remember."""
+    from muster import cli
+
+    visited: list[str] = []
+    real = cli.process_extract
+
+    def spy(slug, model=None, limit=0):
+        if slug == "all":
+            return real(slug, model=model, limit=limit)
+        visited.append(slug)
+
+    monkeypatch.setattr(cli, "process_extract", spy)
+    # The recursion goes through the module attribute, so the spy sees each call.
+    monkeypatch.setattr(
+        "muster.processes.all_processes",
+        lambda _conn: [
+            type("P", (), {"slug": "one", "name": "One"})(),
+            type("P", (), {"slug": "two", "name": "Two"})(),
+        ],
+    )
+    real("all")
+    assert visited == ["one", "two"]
