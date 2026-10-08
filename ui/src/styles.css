@@ -536,6 +536,9 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
   cursor: pointer;
 }
 .gather-row:hover { background: var(--sel); }
+/* The keyboard selection. Applied since gather mode was built, and never drawn:
+   there was no rule for it, so ↑/↓ moved a selection nobody could see. */
+.gather-row.selected { background: var(--sel); box-shadow: inset 2px 0 0 var(--accent); }
 .gather-row.overdue .gather-when { color: #ff8f8f; font-weight: 600; }
 .gather-when {
   flex: none;
@@ -579,13 +582,13 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
   cursor: pointer;
   opacity: 0;
 }
-.gather-row:hover .settle, .gather-row.selected /* Settled a moment ago: struck through where it stands, so the click is seen to
+.gather-row:hover .settle, .gather-row.selected .settle { opacity: 1; }
+
+/* Settled a moment ago: struck through where it stands, so the click is seen to
    land. Moving the row to another section while the eye is on the old place is
    how "done" came to look like it did nothing. */
 .gather-row.settled { opacity: 0.6; }
 .gather-row.settled .gather-what { text-decoration: line-through; }
-
-.settle { opacity: 1; }
 .settle:hover { color: var(--fg); border-color: var(--accent); }
 
 /* Asked once, when a deadline has passed with nothing since. */

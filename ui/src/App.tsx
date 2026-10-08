@@ -401,8 +401,15 @@ export default function App() {
   useEffect(() => {
     const q = query.trim();
     if (!q) {
+      // Emptying the box is a cancellation, not a pause. Without bumping the
+      // ticket, a search already in flight came back and repopulated results for
+      // a query that no longer existed — and `searching` stayed true meanwhile,
+      // so the panel said "Searching…" over an empty box instead of going home.
+      latest.current += 1;
       setResponse(null);
       setError(null);
+      setSearching(false);
+      setSelected(0);
       return;
     }
     const ticket = ++latest.current;

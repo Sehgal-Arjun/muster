@@ -69,9 +69,11 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
       if (!rows.length) return;
       if (event.key === "ArrowDown") {
         event.preventDefault();
+        event.stopPropagation();
         setSelected((i) => Math.min(i + 1, rows.length - 1));
       } else if (event.key === "ArrowUp") {
         event.preventDefault();
+        event.stopPropagation();
         setSelected((i) => Math.max(i - 1, 0));
       } else if (event.key === "Enter") {
         const row = rows[selected];
@@ -79,11 +81,16 @@ export function HomeView({ onOpenProcess }: { onOpenProcess: (slug: string) => v
         // opening an empty screen is not an answer to a keystroke.
         if (!row || row.pending) return;
         event.preventDefault();
+        event.stopPropagation();
         onOpenProcess(row.slug);
       }
     };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    // Capture phase, and stops there: React's own handler sits on the app
+    // container and moves the (empty) results selection for the same keys. Two
+    // handlers for one keystroke is how a binding ends up ambiguous, and the
+    // screen showing is the one that should own its keys.
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
   }, [home, selected, onOpenProcess]);
 
   if (error) {
