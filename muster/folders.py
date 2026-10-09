@@ -307,6 +307,21 @@ def _fuse(arms: list[list[tuple[int, Folder]]], limit: int) -> list[Folder]:
     return [seen[i] for i in ordered[:limit]]
 
 
+def word_matches(conn, words: list[str], depth: int) -> list[tuple[int, Folder]]:
+    """Folders whose path contains every word given. Public for `placing`."""
+    return _word_arm(conn, words, depth)
+
+
+def meaning_matches(conn, text: str, model_id: str, depth: int) -> list[tuple[int, Folder]]:
+    """Folders that mean something close to `text`. Public for `placing`."""
+    return _meaning_arm(conn, text, model_id, depth)
+
+
+def fuse(arms: list[list[tuple[int, Folder]]], limit: int) -> list[Folder]:
+    """Reciprocal rank fusion over folder arms. Public for `placing`."""
+    return _fuse(arms, limit)
+
+
 def suggest(conn, query: str, limit: int = 3, model_id: str | None = None) -> list[Folder]:
     """Directories a query might have meant, best first.
 

@@ -94,6 +94,12 @@ const SERVE_LABEL: &str = "dev.muster.desktop.serve";
 /// Emitted on every summon so the frontend can take focus. See `toggle`.
 pub const SHOWN_EVENT: &str = "muster://shown";
 
+/// Emitted when files are dropped on the panel, with their paths.
+///
+/// The webview swallows HTML drop events when Tauri's own drag-drop is enabled,
+/// so this comes off the window event rather than the DOM.
+pub const DROPPED_EVENT: &str = "muster://dropped";
+
 #[cfg(target_os = "macos")]
 tauri_panel! {
     panel!(SpotlightPanel {
@@ -406,6 +412,7 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             build_panel(app.handle())?;
+            watch_for_drops(app.handle());
             // Put it back where it was left, if it was ever moved.
             #[cfg(target_os = "macos")]
             restore_placement(app.handle());
@@ -485,6 +492,27 @@ fn build_panel(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
         .visible(false)
         .build()?;
     Ok(())
+}
+
+/// Tell the frontend when something is dropped on the panel.
+///
+/// Paths only. What to do with them — where the file might belong, and whether to
+/// move it — is a question for the index and for the reader, and neither of those
+/// lives here.
+fn watch_for_drops(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(PANEL) else { return };
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+            let names: Vec<String> = paths
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect();
+            if !names.is_empty() {
+                let _ = handle.emit(DROPPED_EVENT, names);
+            }
+        }
+    });
 }
 
 fn register_hotkey(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {

@@ -958,3 +958,102 @@ def test_a_running_extraction_can_be_found_by_a_panel_that_did_not_start_it(
         assert "stopping" not in body
     finally:
         api_mod._extract_jobs.clear()
+
+
+# --- placing a dropped file ------------------------------------------------
+
+
+def test_propose_describes_the_file_and_suggests_nothing_it_cannot_justify(
+    client, tmp_path
+) -> None:
+    dropped = tmp_path / "some receipt.pdf"
+    dropped.write_bytes(b"%PDF-1.4 nothing readable")
+    body = client.post("/place/propose", json={"path": str(dropped)}).json()
+    assert body["file"]["name"] == "some receipt.pdf"
+    assert body["file"]["folder"] == str(tmp_path)
+    # Never indexed, which is the ordinary case for something in Downloads.
+    assert body["file"]["doc_id"] is None
+    # No folders are indexed in this fixture, so there is nothing to suggest —
+    # and an empty list is the honest answer rather than a filler.
+    assert body["candidates"] == []
+
+
+def test_propose_refuses_a_path_that_is_not_a_file(client, tmp_path) -> None:
+    assert client.post("/place/propose", json={"path": str(tmp_path)}).status_code == 404
+    assert client.post("/place/propose", json={"path": ""}).status_code == 400
+
+
+def test_confirm_moves_the_file_and_can_be_undone(client, tmp_path) -> None:
+    source, destination = tmp_path / "from", tmp_path / "to"
+    source.mkdir()
+    destination.mkdir()
+    dropped = source / "lease.pdf"
+    dropped.write_text("a lease")
+
+    body = client.post(
+        "/place/confirm", json={"path": str(dropped), "destination": str(destination)}
+    ).json()
+    assert not dropped.exists()
+    assert (destination / "lease.pdf").read_text() == "a lease"
+    assert body["to"] == str(destination / "lease.pdf")
+
+    undone = client.post("/place/undo", json={"move": body["move"]}).json()
+    assert dropped.read_text() == "a lease"
+    assert not (destination / "lease.pdf").exists()
+    assert undone["to"] == str(dropped)
+
+
+def test_confirm_never_overwrites(client, tmp_path) -> None:
+    """Muster does not get to invent "lease (2).pdf" on somebody's behalf, and it
+    certainly does not get to replace the file that is already there."""
+    source, destination = tmp_path / "from", tmp_path / "to"
+    source.mkdir()
+    destination.mkdir()
+    (source / "lease.pdf").write_text("the new one")
+    (destination / "lease.pdf").write_text("the one already there")
+
+    response = client.post(
+        "/place/confirm",
+        json={"path": str(source / "lease.pdf"), "destination": str(destination)},
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "refused"
+    assert (destination / "lease.pdf").read_text() == "the one already there"
+    assert (source / "lease.pdf").read_text() == "the new one"
+
+
+def test_moving_an_indexed_file_keeps_it_one_document(client, conn, tmp_path) -> None:
+    """A file document's identity is its path. Without repointing it, the sweep
+    marks the old path gone and the next walk ingests the same bytes as a second
+    document — one death and one birth instead of one move."""
+    import json as jsonlib
+
+    source, destination = tmp_path / "from", tmp_path / "to"
+    source.mkdir()
+    destination.mkdir()
+    dropped = source / "lease.pdf"
+    dropped.write_text("a lease")
+
+    conn.execute(
+        "INSERT INTO docs (source, source_uid, content_hash, mime, doc_date, date_source,"
+        " ingested_at, title, meta_json, missing_since) VALUES ('file', ?, 'abc',"
+        " 'application/pdf', '2026-01-01T00:00:00+00:00', 'mtime', '2026-01-01',"
+        " 'lease.pdf', ?, '2026-02-01')",
+        (str(dropped), jsonlib.dumps({"path": str(dropped)})),
+    )
+    conn.commit()
+
+    client.post(
+        "/place/confirm", json={"path": str(dropped), "destination": str(destination)}
+    )
+    # Scoped by path: the mbox fixture also ingests with source='file', which is
+    # about where a message came from rather than about the filesystem.
+    rows = conn.execute(
+        "SELECT source_uid, meta_json, missing_since FROM docs"
+        " WHERE source_uid LIKE ?", (f"{tmp_path}%",),
+    ).fetchall()
+    assert len(rows) == 1, "the move created a second document"
+    assert rows[0]["source_uid"] == str(destination / "lease.pdf")
+    assert jsonlib.loads(rows[0]["meta_json"])["path"] == str(destination / "lease.pdf")
+    # It had been marked gone; it demonstrably is not.
+    assert rows[0]["missing_since"] is None

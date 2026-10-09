@@ -981,6 +981,87 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             },
         }
 
+    @app.post("/place/propose")
+    def place_propose(body: dict = Body(...), _db: None = Depends(require_db)) -> dict:
+        """Where a dropped file might belong. Proposes; moves nothing."""
+        from muster import placing
+
+        raw = (body.get("path") or "").strip()
+        if not raw:
+            raise ApiError(400, "bad_request", "path is required")
+        target = Path(raw).expanduser()
+        if not target.is_file():
+            raise ApiError(404, "not_found", f"no file at {target}")
+
+        conn = _connection(cfg)
+        found = placing.candidates(conn, target, model_id=cfg.embed.model_id)
+        row = conn.execute(
+            "SELECT id FROM docs WHERE source = 'file'"
+            " AND (source_uid = ? OR json_extract(meta_json, '$.path') = ?)",
+            (str(target), str(target)),
+        ).fetchone()
+        return {
+            "file": {
+                "path": str(target),
+                "name": target.name,
+                "folder": str(target.parent),
+                "size": target.stat().st_size,
+                # Whether Muster already knows this file. Not required to move it:
+                # placing a file it has never indexed is the ordinary case for
+                # something that just landed in Downloads.
+                "doc_id": row["id"] if row else None,
+            },
+            "candidates": [c.as_json() for c in found],
+        }
+
+    @app.post("/place/confirm")
+    def place_confirm(body: dict = Body(...), _db: None = Depends(require_db)) -> dict:
+        """Move one file into one folder, having been told to.
+
+        The only endpoint that writes to the user's files, and it is deliberately
+        the narrowest thing that could: one file, one destination named by the
+        caller, no overwriting, and recorded so it can be undone.
+        """
+        from muster import placing
+
+        raw = (body.get("path") or "").strip()
+        destination = (body.get("destination") or "").strip()
+        if not raw or not destination:
+            raise ApiError(400, "bad_request", "path and destination are required")
+
+        conn = _connection(cfg)
+        try:
+            moved = placing.move(conn, raw, destination)
+        except placing.MoveRefused as exc:
+            # Refused, not failed: the caller asked for something that would have
+            # destroyed or invented something.
+            raise ApiError(409, "refused", str(exc)) from exc
+        move_id = conn.execute(
+            "SELECT id FROM file_moves WHERE to_path = ? ORDER BY id DESC LIMIT 1",
+            (moved.to_path,),
+        ).fetchone()
+        return {
+            "from": moved.from_path,
+            "to": moved.to_path,
+            "doc_id": moved.doc_id,
+            "move": move_id["id"] if move_id else None,
+        }
+
+    @app.post("/place/undo")
+    def place_undo(body: dict = Body(...), _db: None = Depends(require_db)) -> dict:
+        """Put a moved file back where it was."""
+        from muster import placing
+
+        move_id = body.get("move")
+        if not isinstance(move_id, int):
+            raise ApiError(400, "bad_request", "move is required")
+        conn = _connection(cfg)
+        try:
+            moved = placing.undo(conn, move_id)
+        except placing.MoveRefused as exc:
+            raise ApiError(409, "refused", str(exc)) from exc
+        return {"from": moved.from_path, "to": moved.to_path}
+
     @app.get("/folders")
     def folders(
         q: str = Query(..., description="A name, not a sentence."),

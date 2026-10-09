@@ -320,6 +320,27 @@ export interface ExtractJob {
   started?: boolean;
 }
 
+export interface PlaceCandidate {
+  path: string;
+  display: string;
+  name: string;
+  score: number;
+  /** Why this folder, in the words of the evidence that produced it. */
+  reasons: string[];
+}
+
+export interface PlaceProposal {
+  file: {
+    path: string;
+    name: string;
+    folder: string;
+    size: number;
+    /** Null when Muster has never indexed this file, which is the common case. */
+    doc_id: number | null;
+  };
+  candidates: PlaceCandidate[];
+}
+
 export class ApiError extends Error {
   constructor(
     readonly code: string,
@@ -422,6 +443,13 @@ export const api = {
   folders: (q: string) => get<{ folders: FolderHit[] }>("/folders", { q }),
 
   home: () => get<HomeView>("/home"),
+  placePropose: (path: string) => postJson<PlaceProposal>("/place/propose", { path }),
+  placeConfirm: (path: string, destination: string) =>
+    postJson<{ from: string; to: string; doc_id: number | null; move: number | null }>(
+      "/place/confirm", { path, destination },
+    ),
+  placeUndo: (move: number) =>
+    postJson<{ from: string; to: string }>("/place/undo", { move }),
   extract: (slug: string) => post<ExtractJob>(`/process/${encodeURIComponent(slug)}/extract`),
   runningExtract: () => get<{ job: ExtractJob | null }>("/extract/current"),
   extractJob: (job: string) => get<ExtractJob>(`/process/extract/${encodeURIComponent(job)}`),

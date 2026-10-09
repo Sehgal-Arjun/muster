@@ -17,6 +17,7 @@ import { FolderJump } from "./components/FolderJump";
 import { GatherView } from "./components/GatherView";
 import { HomeView } from "./components/HomeView";
 import { Keys } from "./components/Keys";
+import { PlaceView } from "./components/PlaceView";
 import { applyLayout, storeLayout, storedLayout, type Layout } from "./layout";
 import { ProcessPicker } from "./components/ProcessPicker";
 import { Footer } from "./components/Footer";
@@ -110,6 +111,13 @@ export default function App() {
   const [showActions, setShowActions] = useState(false);
   /** The full key list, which the footer is deliberately too small to be. */
   const [showKeys, setShowKeys] = useState(false);
+  /**
+   * Files dropped on the panel, waiting to be placed. A queue, because dropping
+   * four things at once is one gesture and four decisions.
+   */
+  const [dropped, setDropped] = useState<string[]>([]);
+  const [placeFlash, setPlaceFlash] = useState<string | null>(null);
+  const undoMove = useRef<(() => Promise<void>) | null>(null);
   const [override, setOverride] = useState<Record<string, string | number> | null>(null);
   // Needed to turn a content hash into a path Finder can reveal. Fetched once;
   // a search should never wait on it.
@@ -281,6 +289,26 @@ export default function App() {
   const current: Hit | null = hits[selected] ?? null;
 
   useEffect(() => inputRef.current?.focus(), []);
+
+  // Dropped files arrive from the window rather than the DOM: Tauri's own
+  // drag-drop handling swallows the HTML events.
+  useEffect(() => {
+    if (USE_MOCK) return;
+    let stop: (() => void) | undefined;
+    void (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      stop = await listen<string[]>("muster://dropped", (event) => {
+        setDropped(event.payload.filter(Boolean));
+      });
+    })();
+    return () => stop?.();
+  }, []);
+
+  useEffect(() => {
+    if (!placeFlash) return;
+    const timer = setTimeout(() => setPlaceFlash(null), 4000);
+    return () => clearTimeout(timer);
+  }, [placeFlash]);
 
   // The window has to change shape, not just the stylesheet: a message at 720
   // points is a column of six words.
@@ -753,12 +781,31 @@ export default function App() {
         goHome();
         return;
       }
+      if (
+        (event.metaKey || event.ctrlKey)
+        && event.key.toLowerCase() === "z"
+        && undoMove.current
+      ) {
+        // Muster performed the move, so Muster can take it back.
+        event.preventDefault();
+        const undo = undoMove.current;
+        undoMove.current = null;
+        void undo()
+          .then(() => setPlaceFlash("Put back where it was"))
+          .catch(() => setPlaceFlash("Could not put it back"));
+        return;
+      }
       if (event.key !== "Escape") return;
       event.preventDefault();
       // The key list is reference material laid over whatever you were doing;
       // escape should put it away and leave that untouched.
       if (showKeys) {
         setShowKeys(false);
+        return;
+      }
+      if (dropped.length) {
+        // Leaves the file exactly where it was: nothing has been moved yet.
+        setDropped((queue) => queue.slice(1));
         return;
       }
       // The actions palette owns Escape while it is open: it should close on
@@ -785,7 +832,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onEscape);
     return () => document.removeEventListener("keydown", onEscape);
-  }, [showActions, hide, stack.length, back, gatherSlug, picking, goHome, layout, readingItem, showKeys]);
+  }, [showActions, hide, stack.length, back, gatherSlug, picking, goHome, layout, readingItem, showKeys, dropped.length]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (showActions) return;
@@ -994,7 +1041,17 @@ export default function App() {
             </div>
           </aside>
           <main className="pane-main">
-            {showDocInPane ? (
+            {dropped.length > 0 ? (
+              <PlaceView
+                path={dropped[0]!}
+                onDone={(message, undo) => {
+                  setPlaceFlash(message);
+                  undoMove.current = undo;
+                  setDropped((queue) => queue.slice(1));
+                }}
+                onCancel={() => setDropped((queue) => queue.slice(1))}
+              />
+            ) : showDocInPane ? (
               docPane
             ) : (
               <div className="empty pane-empty">
@@ -1013,6 +1070,7 @@ export default function App() {
           <Actions hit={current} actions={actions} onClose={() => setShowActions(false)} />
         )}
         {showKeys && <Keys onClose={() => setShowKeys(false)} />}
+        {placeFlash && <div className="doc-flash place-flash">{placeFlash}</div>}
       </div>
     );
   }
@@ -1023,8 +1081,18 @@ export default function App() {
 
       {folderHint}
 
-      <div className={`results${reading || gathering ? " reading" : ""}`} ref={resultsRef}>
-        {picking
+      <div className={`results${reading || gathering || dropped.length ? " reading" : ""}`} ref={resultsRef}>
+        {dropped.length > 0 ? (
+          <PlaceView
+            path={dropped[0]!}
+            onDone={(message, undo) => {
+              setPlaceFlash(message);
+              undoMove.current = undo;
+              setDropped((queue) => queue.slice(1));
+            }}
+            onCancel={() => setDropped((queue) => queue.slice(1))}
+          />
+        ) : picking
           ? picker
           : gatherSlug !== null && !reading
             ? gatherPane
@@ -1040,6 +1108,8 @@ export default function App() {
       )}
 
       {showKeys && <Keys onClose={() => setShowKeys(false)} />}
+
+      {placeFlash && <div className="doc-flash place-flash">{placeFlash}</div>}
     </div>
   );
 }

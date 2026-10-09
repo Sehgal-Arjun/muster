@@ -730,3 +730,13 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
   0%, 100% { opacity: 0.25; }
   50% { opacity: 1; }
 }
+
+/* --- placing a dropped file --------------------------------------------- */
+
+.place-where { font-size: 11.5px; margin-top: 3px; }
+.place-list { margin-bottom: 8px; }
+.place-why { flex: none; font-size: 10.5px; max-width: 45%; text-align: right; }
+.place-filter { border: 1px solid var(--line); border-radius: 7px; }
+.place-cancel { margin-left: 10px; }
+/* Long enough to read and to reach ⌘Z, since a move is a change to your disk. */
+.place-flash { bottom: 46px; }
