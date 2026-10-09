@@ -22,7 +22,7 @@ export function PlaceView({
   onCancel,
 }: {
   path: string;
-  onDone: (message: string, undo: (() => Promise<void>) | null) => void;
+  onDone: (result: { name: string; to: string; move: number | null }) => void;
   onCancel: () => void;
 }) {
   const [proposal, setProposal] = useState<PlaceProposal | null>(null);
@@ -79,15 +79,11 @@ export function PlaceView({
       setMoving(true);
       try {
         const result = await api.placeConfirm(path, destination);
-        const name = result.to.split("/").pop() ?? result.to;
-        onDone(
-          `Moved ${name} to ${destination.replace(/^.*\/([^/]+)$/, "$1")} · ⌘Z to undo`,
-          result.move == null
-            ? null
-            : async () => {
-                await api.placeUndo(result.move as number);
-              },
-        );
+        onDone({
+          name: result.to.split("/").pop() ?? result.to,
+          to: result.to,
+          move: result.move,
+        });
       } catch (cause) {
         setError(cause instanceof ApiError ? cause.message : String(cause));
         setMoving(false);
@@ -146,16 +142,24 @@ export function PlaceView({
                   : `${proposal.candidates.length} plausible places`}
           </div>
 
-          <ul className="gather-items place-list">
+          <ul className="place-list">
             {options.map((option, index) => (
               <li
                 key={option.path}
-                className={`gather-row${index === selected ? " selected" : ""}`}
+                className={`place-card${index === selected ? " selected" : ""}`}
                 onClick={() => void confirm(option.path)}
+                onMouseEnter={() => setSelected(index)}
               >
-                <span className="gather-what">{option.display}</span>
+                <div className="place-card-top">
+                  <span className="place-folder">{option.display}</span>
+                  {index === selected && <span className="place-go dim">↵ move here</span>}
+                </div>
                 {option.reasons.length > 0 && (
-                  <span className="dim place-why">{option.reasons.join(" · ")}</span>
+                  <div className="place-reasons">
+                    {option.reasons.map((reason) => (
+                      <span key={reason} className="chip place-chip">{reason}</span>
+                    ))}
+                  </div>
                 )}
               </li>
             ))}
@@ -181,6 +185,47 @@ export function PlaceView({
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+
+/**
+ * What happened, once something moved.
+ *
+ * A toast that fades is the wrong shape for a change to somebody's disk: it
+ * disappears while they are still reading it, and the thing that undoes it goes
+ * with it. This stays until dismissed, names the destination in full, and keeps
+ * the way back next to the news.
+ */
+export function Placed({
+  name,
+  to,
+  onUndo,
+  onClose,
+}: {
+  name: string;
+  to: string;
+  onUndo: (() => Promise<void>) | null;
+  onClose: () => void;
+}) {
+  const folder = to.slice(0, to.lastIndexOf("/")) || to;
+  const home = folder.replace(/^\/Users\/[^/]+/, "~");
+  return (
+    <div className="placed">
+      <div className="placed-tick">✓</div>
+      <div className="placed-text">
+        <div className="placed-name">{name}</div>
+        <div className="dim placed-where">moved to {home}</div>
+      </div>
+      {onUndo && (
+        <button className="placed-undo" onClick={() => void onUndo()}>
+          undo <span className="dim">⌘Z</span>
+        </button>
+      )}
+      <button className="placed-close" onClick={onClose} title="dismiss">
+        ✕
+      </button>
     </div>
   );
 }

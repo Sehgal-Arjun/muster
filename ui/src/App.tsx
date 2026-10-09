@@ -17,7 +17,7 @@ import { FolderJump } from "./components/FolderJump";
 import { GatherView } from "./components/GatherView";
 import { HomeView } from "./components/HomeView";
 import { Keys } from "./components/Keys";
-import { PlaceView } from "./components/PlaceView";
+import { Placed, PlaceView } from "./components/PlaceView";
 import {
   applyLayout, applyPinned, storeLayout, storedLayout, storedPinned, type Layout,
 } from "./layout";
@@ -119,7 +119,12 @@ export default function App() {
    */
   const [dropped, setDropped] = useState<string[]>([]);
   const [placeFlash, setPlaceFlash] = useState<string | null>(null);
-  const undoMove = useRef<(() => Promise<void>) | null>(null);
+  /** Something is being dragged over the panel right now. */
+  const [dragging, setDragging] = useState(false);
+  /** The move just made, shown as a result rather than a disappearing toast. */
+  const [placed, setPlaced] = useState<
+    { name: string; to: string; move: number | null } | null
+  >(null);
   const [override, setOverride] = useState<Record<string, string | number> | null>(null);
   // Needed to turn a content hash into a path Finder can reveal. Fetched once;
   // a search should never wait on it.
@@ -302,7 +307,22 @@ export default function App() {
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
       stop = await listen<string[]>("muster://dropped", (event) => {
+        setDragging(false);
         setDropped(event.payload.filter(Boolean));
+      });
+    })();
+    return () => stop?.();
+  }, []);
+
+  // Drag over and away, so the panel can show it is a target instead of leaving
+  // you to find out by letting go.
+  useEffect(() => {
+    if (USE_MOCK) return;
+    let stop: (() => void) | undefined;
+    void (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      stop = await listen<string>("muster://dragging", (event) => {
+        setDragging(event.payload === "over");
       });
     })();
     return () => stop?.();
@@ -803,13 +823,14 @@ export default function App() {
       if (
         (event.metaKey || event.ctrlKey)
         && event.key.toLowerCase() === "z"
-        && undoMove.current
+        && placed?.move != null
       ) {
         // Muster performed the move, so Muster can take it back.
         event.preventDefault();
-        const undo = undoMove.current;
-        undoMove.current = null;
-        void undo()
+        const move = placed.move;
+        setPlaced(null);
+        void api
+          .placeUndo(move)
           .then(() => setPlaceFlash("Put back where it was"))
           .catch(() => setPlaceFlash("Could not put it back"));
         return;
@@ -820,6 +841,10 @@ export default function App() {
       // escape should put it away and leave that untouched.
       if (showKeys) {
         setShowKeys(false);
+        return;
+      }
+      if (placed) {
+        setPlaced(null);
         return;
       }
       if (dropped.length) {
@@ -851,7 +876,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onEscape);
     return () => document.removeEventListener("keydown", onEscape);
-  }, [showActions, hide, stack.length, back, gatherSlug, picking, goHome, layout, readingItem, showKeys, dropped.length]);
+  }, [showActions, hide, stack.length, back, gatherSlug, picking, goHome, layout, readingItem, showKeys, dropped.length, placed]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (showActions) return;
@@ -1064,9 +1089,8 @@ export default function App() {
             {dropped.length > 0 ? (
               <PlaceView
                 path={dropped[0]!}
-                onDone={(message, undo) => {
-                  setPlaceFlash(message);
-                  undoMove.current = undo;
+                onDone={(result) => {
+                  setPlaced(result);
                   setDropped((queue) => queue.slice(1));
                 }}
                 onCancel={() => setDropped((queue) => queue.slice(1))}
@@ -1090,6 +1114,39 @@ export default function App() {
           <Actions hit={current} actions={actions} onClose={() => setShowActions(false)} />
         )}
         {showKeys && <Keys onClose={() => setShowKeys(false)} />}
+        {/* A drop target you can see. Dashed rather than solid, because the panel
+            is not a well and the file is not falling in yet. */}
+        {dragging && dropped.length === 0 && (
+          <div className="drop-veil">
+            <div className="drop-veil-inner">
+                <div className="drop-title">Drop it here</div>
+                <div className="dim">Muster will say where it thinks it belongs</div>
+            </div>
+          </div>
+        )}
+
+        {placed && (
+          <Placed
+            name={placed.name}
+            to={placed.to}
+            onUndo={
+                placed.move == null
+                  ? null
+                  : async () => {
+                        const move = placed.move as number;
+                        setPlaced(null);
+                        try {
+                          await api.placeUndo(move);
+                          setPlaceFlash("Put back where it was");
+                        } catch {
+                          setPlaceFlash("Could not put it back");
+                        }
+                    }
+            }
+            onClose={() => setPlaced(null)}
+          />
+        )}
+
         {placeFlash && <div className="doc-flash place-flash">{placeFlash}</div>}
       </div>
     );
@@ -1105,9 +1162,8 @@ export default function App() {
         {dropped.length > 0 ? (
           <PlaceView
             path={dropped[0]!}
-            onDone={(message, undo) => {
-              setPlaceFlash(message);
-              undoMove.current = undo;
+            onDone={(result) => {
+              setPlaced(result);
               setDropped((queue) => queue.slice(1));
             }}
             onCancel={() => setDropped((queue) => queue.slice(1))}
@@ -1128,6 +1184,39 @@ export default function App() {
       )}
 
       {showKeys && <Keys onClose={() => setShowKeys(false)} />}
+
+      {/* A drop target you can see. Dashed rather than solid, because the panel
+          is not a well and the file is not falling in yet. */}
+      {dragging && dropped.length === 0 && (
+        <div className="drop-veil">
+          <div className="drop-veil-inner">
+            <div className="drop-title">Drop it here</div>
+            <div className="dim">Muster will say where it thinks it belongs</div>
+          </div>
+        </div>
+      )}
+
+      {placed && (
+        <Placed
+          name={placed.name}
+          to={placed.to}
+          onUndo={
+            placed.move == null
+              ? null
+              : async () => {
+                  const move = placed.move as number;
+                  setPlaced(null);
+                  try {
+                    await api.placeUndo(move);
+                    setPlaceFlash("Put back where it was");
+                  } catch {
+                    setPlaceFlash("Could not put it back");
+                  }
+                }
+          }
+          onClose={() => setPlaced(null)}
+        />
+      )}
 
       {placeFlash && <div className="doc-flash place-flash">{placeFlash}</div>}
     </div>

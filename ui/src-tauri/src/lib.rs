@@ -30,6 +30,13 @@ static PLACED: AtomicBool = AtomicBool::new(false);
 /// than a rule, and the choice is the reader's.
 static PINNED: AtomicBool = AtomicBool::new(false);
 
+/// A hide already waiting on the mouse button, so a second resign-key does not
+/// start a second waiter.
+static DEFERRED: AtomicBool = AtomicBool::new(false);
+
+/// Set when files land on the panel, and read once by the waiting hide.
+static DROPPED_RECENTLY: AtomicBool = AtomicBool::new(false);
+
 /// Where the panel was left, across launches.
 ///
 /// A window you positioned and then found back in the middle of the screen after
@@ -107,6 +114,28 @@ pub const SHOWN_EVENT: &str = "muster://shown";
 /// The webview swallows HTML drop events when Tauri's own drag-drop is enabled,
 /// so this comes off the window event rather than the DOM.
 pub const DROPPED_EVENT: &str = "muster://dropped";
+
+/// Emitted while something is dragged over the panel, or leaves it.
+pub const DRAG_EVENT: &str = "muster://dragging";
+
+/// Whether the mouse button is currently held down, anywhere on the system.
+///
+/// The one fact that separates "I clicked away, put yourself away" from "I am
+/// picking something up to bring to you". Both begin identically — a mouse-down
+/// in another application, which resigns the panel's key status before any drag
+/// exists to detect — and they differ only in whether the button is still down.
+///
+/// Declared rather than pulled in: this is one function from a framework Cocoa
+/// has already linked, and a crate for it would be a dependency for a boolean.
+#[cfg(target_os = "macos")]
+fn mouse_is_down() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
+    }
+    // Combined session state, left button, then right — a drag can be either.
+    unsafe { CGEventSourceButtonState(0, 0) || CGEventSourceButtonState(0, 1) }
+}
 
 #[cfg(target_os = "macos")]
 tauri_panel! {
@@ -495,6 +524,13 @@ fn build_panel(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
         if PINNED.load(Ordering::Relaxed) {
             return;
         }
+        // Button still down: this may be the start of a drag towards the panel,
+        // and hiding now would take the target away before the drag arrives.
+        // Wait for the button to come up and decide then.
+        if mouse_is_down() {
+            hide_when_the_button_comes_up(&handle);
+            return;
+        }
         hide(&handle);
     });
     panel.set_event_handler(Some(handler.as_ref()));
@@ -526,14 +562,67 @@ fn watch_for_drops(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(PANEL) else { return };
     let handle = app.clone();
     window.on_window_event(move |event| {
+        // Enter and leave, so the panel can show that it is a target rather than
+        // leaving the reader to guess whether a drop will do anything.
+        match event {
+            tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Enter { .. })
+            | tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Over { .. }) => {
+                let _ = handle.emit(DRAG_EVENT, "over");
+            }
+            tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Leave) => {
+                let _ = handle.emit(DRAG_EVENT, "leave");
+            }
+            _ => {}
+        }
         if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
             let names: Vec<String> = paths
                 .iter()
                 .map(|path| path.to_string_lossy().to_string())
                 .collect();
             if !names.is_empty() {
+                DROPPED_RECENTLY.store(true, Ordering::Relaxed);
                 let _ = handle.emit(DROPPED_EVENT, names);
             }
+        }
+    });
+}
+
+/// Hide once the mouse is released, unless something happened meanwhile.
+///
+/// Polled on a plain thread rather than through an event tap: watching a boolean
+/// ten times a second for the length of a drag is nothing, and a tap would want
+/// accessibility permission for a question this small.
+#[cfg(target_os = "macos")]
+fn hide_when_the_button_comes_up(app: &tauri::AppHandle) {
+    if DEFERRED.swap(true, Ordering::Relaxed) {
+        return;      // already waiting
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        // Up to a minute: a long drag across desktops is still one gesture, and
+        // a stuck button should not pin the panel forever.
+        for _ in 0..600 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if !mouse_is_down() {
+                break;
+            }
+        }
+        DEFERRED.store(false, Ordering::Relaxed);
+        // A drop landed, or the panel was pinned, or it took focus back: in all
+        // three the reader is using it, and hiding would be an answer to a
+        // question nobody asked.
+        if DROPPED_RECENTLY.swap(false, Ordering::Relaxed)
+            || PINNED.load(Ordering::Relaxed)
+        {
+            return;
+        }
+        // Focused again means the reader came back to it themselves.
+        let focused = handle
+            .get_webview_window(PANEL)
+            .and_then(|window| window.is_focused().ok())
+            .unwrap_or(false);
+        if !focused {
+            hide(&handle);
         }
     });
 }

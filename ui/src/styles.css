@@ -740,3 +740,86 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
 .place-cancel { margin-left: 10px; }
 /* Long enough to read and to reach ⌘Z, since a move is a change to your disk. */
 .place-flash { bottom: 46px; }
+
+/* --- a drag in flight ---------------------------------------------------- */
+
+/* Dashed, not solid: the panel is not a well and the file is not falling in
+   yet. Ignores the pointer entirely — an overlay that eats the drop it exists to
+   advertise would be a fine joke. */
+.drop-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(24, 24, 27, 0.72);
+  pointer-events: none;
+  animation: veil-in 120ms ease-out;
+}
+.drop-veil-inner {
+  border: 2px dashed var(--accent);
+  border-radius: 14px;
+  padding: 26px 40px;
+  text-align: center;
+  animation: veil-pulse 1.6s ease-in-out infinite;
+}
+.drop-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+@keyframes veil-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes veil-pulse {
+  0%, 100% { transform: scale(1); border-color: rgba(127, 156, 255, 0.55); }
+  50% { transform: scale(1.02); border-color: rgba(127, 156, 255, 0.95); }
+}
+
+/* --- where it will go ---------------------------------------------------- */
+
+.place-list { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; }
+.place-card {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 11px;
+  cursor: pointer;
+}
+.place-card.selected { background: var(--sel); border-color: rgba(127, 156, 255, 0.45); }
+.place-card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.place-folder { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.place-go { flex: none; font-size: 10.5px; }
+.place-reasons { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.place-chip { font-size: 10px; }
+
+/* --- what happened ------------------------------------------------------- */
+
+/* Stays until dismissed. A change to somebody's disk should not be reported by
+   something that fades while they are still reading it, taking the undo with it. */
+.placed {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 42px;
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #232326;
+  border: 1px solid rgba(127, 156, 255, 0.35);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+  animation: veil-in 140ms ease-out;
+}
+.placed-tick { color: var(--accent); font-size: 15px; }
+.placed-text { flex: 1; min-width: 0; }
+.placed-name { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.placed-where { font-size: 11px; }
+.placed-undo, .placed-close {
+  flex: none;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.placed-close { border: none; color: var(--dim); }
