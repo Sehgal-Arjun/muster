@@ -16,6 +16,7 @@ import { EmptyState } from "./components/EmptyState";
 import { FolderJump } from "./components/FolderJump";
 import { GatherView } from "./components/GatherView";
 import { HomeView } from "./components/HomeView";
+import { Keys } from "./components/Keys";
 import { applyLayout, storeLayout, storedLayout, type Layout } from "./layout";
 import { ProcessPicker } from "./components/ProcessPicker";
 import { Footer } from "./components/Footer";
@@ -107,6 +108,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   const [showActions, setShowActions] = useState(false);
+  /** The full key list, which the footer is deliberately too small to be. */
+  const [showKeys, setShowKeys] = useState(false);
   const [override, setOverride] = useState<Record<string, string | number> | null>(null);
   // Needed to turn a content hash into a path Finder can reveal. Fetched once;
   // a search should never wait on it.
@@ -733,6 +736,11 @@ export default function App() {
           .catch(() => undefined);
         return;
       }
+      if ((event.metaKey || event.ctrlKey) && event.key === "/") {
+        event.preventDefault();
+        setShowKeys((open) => !open);
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && event.key === "\\") {
         event.preventDefault();
         setLayout((current) => (current === "split" ? "stack" : "split"));
@@ -747,6 +755,12 @@ export default function App() {
       }
       if (event.key !== "Escape") return;
       event.preventDefault();
+      // The key list is reference material laid over whatever you were doing;
+      // escape should put it away and leave that untouched.
+      if (showKeys) {
+        setShowKeys(false);
+        return;
+      }
       // The actions palette owns Escape while it is open: it should close on
       // its own without taking the panel with it.
       if (showActions) return;
@@ -771,7 +785,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onEscape);
     return () => document.removeEventListener("keydown", onEscape);
-  }, [showActions, hide, stack.length, back, gatherSlug, picking, goHome, layout, readingItem]);
+  }, [showActions, hide, stack.length, back, gatherSlug, picking, goHome, layout, readingItem, showKeys]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (showActions) return;
@@ -998,6 +1012,7 @@ export default function App() {
         {showActions && (
           <Actions hit={current} actions={actions} onClose={() => setShowActions(false)} />
         )}
+        {showKeys && <Keys onClose={() => setShowKeys(false)} />}
       </div>
     );
   }
@@ -1023,6 +1038,8 @@ export default function App() {
       {showActions && (
         <Actions hit={current} actions={actions} onClose={() => setShowActions(false)} />
       )}
+
+      {showKeys && <Keys onClose={() => setShowKeys(false)} />}
     </div>
   );
 }

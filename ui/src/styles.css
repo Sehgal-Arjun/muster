@@ -224,8 +224,21 @@ code {
   color: var(--dim);
 }
 
-.hints { display: flex; gap: 11px; }
-.hint { display: flex; align-items: center; gap: 4px; }
+/* One line, always. The bar wrapped into two rows in the narrow layout and put
+   "reveal in Finder" in a column of its own; a hint that has to be hunted for is
+   worse than a hint that is not there. Anything that will not fit is dropped
+   rather than folded, and ⌘/ has the complete list. */
+.hints {
+  display: flex;
+  gap: 11px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  min-width: 0;
+}
+.hint { display: flex; align-items: center; gap: 4px; flex: none; white-space: nowrap; }
+.hint-more { color: var(--dim); }
+/* The right-hand side is counts and modes: never squeezed by the hints. */
+.footer-right { flex: none; }
 
 kbd {
   font-family: inherit;
@@ -295,6 +308,32 @@ kbd {
 }
 
 .sheet-item.selected { background: var(--sel); }
+
+/* The full key list. Wider and taller than the ⌘K sheet because it is read
+   rather than filtered. */
+.keys-sheet { max-width: 560px; }
+.keys-body {
+  padding: 10px 14px 14px;
+  max-height: 320px;
+  overflow-y: auto;
+  columns: 2;
+  column-gap: 22px;
+}
+.keys-group { break-inside: avoid; margin-bottom: 12px; }
+.keys-title {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 5px;
+}
+.keys-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 2px 0;
+  font-size: 11.5px;
+}
+.keys-row kbd { flex: none; }
 
 /* --- document view ------------------------------------------------------ */
 

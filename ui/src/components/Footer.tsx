@@ -2,55 +2,45 @@ import type { MouseEvent } from "react";
 
 import type { Mode, SearchResponse } from "../api";
 
+/**
+ * The four or five keys you actually reach for, per screen.
+ *
+ * Thirteen hints did not fit a 720-point panel: the bar wrapped, and "reveal in
+ * Finder" ended up stacked in a column of its own. A hint bar is a reminder, not
+ * a reference — the full set lives behind ⌘/, where it can be read rather than
+ * skimmed past.
+ */
 const SEARCH_HINTS: Array<[string, string]> = [
-  ["↑↓", "navigate"],
+  ["↑↓", "move"],
   ["↵", "read"],
-  ["⌘↵", "reveal in Finder"],
-  ["⌘O", "open"],
   ["⇥", "gather"],
-  ["⌘P", "processes"],
-  ["⌘H", "home"],
-  ["⌘⇧F", "open folder"],
   ["⌘K", "actions"],
-  ["⌘1/2/3", "mode"],
-  ["⌘S", "sort"],
-  ["⌘\\", "layout"],
-  ["esc", "close"],
 ];
 
 // A message has no file on disk, so revealing one shows a content-addressed
-// .eml in a directory that means nothing. Both keys open it where it lives.
+// .eml in a directory that means nothing. ⌘O opens it where it lives.
 const MAIL_HINTS: Array<[string, string]> = [
-  ["↑↓ jk", "scroll"],
-  ["↵", "open attachment"],
+  ["↑↓", "scroll"],
+  ["↵", "attachment"],
   ["⌘O", "open in Gmail"],
-  ["⌘C", "copy body"],
-  ["⌘H", "home"],
-  ["⌘\\", "layout"],
   ["esc", "back"],
 ];
 
-// Same keys, different meanings. Showing the search hints over a document
-// would be telling the reader the wrong thing.
+// Same keys, different meanings. Showing the search hints over a document would
+// be telling the reader the wrong thing.
 const READING_HINTS: Array<[string, string]> = [
-  ["↑↓ jk", "scroll"],
-  ["↵", "open attachment"],
-  ["⌘O", "open"],
-  ["⌘↵", "reveal in Finder"],
-  ["⌘C", "copy body"],
-  ["⌘H", "home"],
+  ["↑↓", "scroll"],
+  ["↵", "attachment"],
+  ["⌘↵", "reveal"],
   ["esc", "back"],
 ];
 
-// Gather is not a result list: ⇥ is spent, and the keys that matter are the ones
-// that change the process rather than move through it.
+// Gather is not a result list: ⇥ is spent, and the keys that matter change the
+// process rather than move through it.
 const GATHER_HINTS: Array<[string, string]> = [
-  ["↑↓ jk", "navigate"],
-  ["↵", "read"],
-  ["⌘D", "mark done"],
-  ["⌘E", "examine unread"],
-  ["⌘P", "processes"],
-  ["⌘H", "home"],
+  ["↑↓", "move"],
+  ["⌘D", "done"],
+  ["⌘E", "examine"],
   ["esc", "back"],
 ];
 
@@ -100,6 +90,11 @@ export function Footer({
             {label}
           </span>
         ))}
+        {/* One door to everything else, rather than everything else on the bar. */}
+        <span className="hint hint-more">
+          <kbd>⌘/</kbd>
+          keys
+        </span>
       </div>
       <div className="footer-right">
         {error ? (
