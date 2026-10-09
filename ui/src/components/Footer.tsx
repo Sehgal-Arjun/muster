@@ -14,7 +14,7 @@ const SEARCH_HINTS: Array<[string, string]> = [
   ["↑↓", "move"],
   ["↵", "read"],
   ["⇥", "gather"],
-  ["⌘K", "actions"],
+  ["⌘⇧P", "keep open"],
 ];
 
 // A message has no file on disk, so revealing one shows a content-addressed
@@ -53,6 +53,7 @@ export function Footer({
   gathering,
   split,
   sort,
+  pinned,
   syncing,
   onDrag,
 }: {
@@ -68,6 +69,8 @@ export function Footer({
   split?: boolean;
   /** Named next to the mode, because it changes what "first" means. */
   sort?: "rank" | "newest";
+  /** Staying up when focus leaves. Shown, because it changes what a click does. */
+  pinned?: boolean;
   syncing: boolean;
   /** The other handle for moving the panel. See beginDrag in App. */
   onDrag?: (event: MouseEvent) => void;
@@ -116,6 +119,13 @@ export function Footer({
         {syncing && <span className="syncing" title="checking for new mail" />}
         {/* Marked when it is not the default, because a single-arm mode is a
             temporary thing and looks identical to normal otherwise. */}
+        {/* A panel that no longer closes when you click away behaves differently
+            enough that it has to say so. */}
+        {pinned && (
+          <span className="mode mode-narrowed" title="staying open — ⌘⇧P to let it close">
+            pinned
+          </span>
+        )}
         {/* Shown always: which of the two orders is in force decides whether
             the top row is a claim about relevance or about time. */}
         {sort && (

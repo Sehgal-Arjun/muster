@@ -22,6 +22,14 @@ use tauri::{Emitter, Manager};
 /// keeps the middle of the window where the middle of the window was.
 static PLACED: AtomicBool = AtomicBool::new(false);
 
+/// Whether the panel should stay up when it loses focus.
+///
+/// Dismiss-on-blur is right for a launcher and wrong for anything that needs a
+/// second window: dragging a file in means clicking Finder first, which is
+/// exactly the event that hides the panel. So the behaviour is a choice rather
+/// than a rule, and the choice is the reader's.
+static PINNED: AtomicBool = AtomicBool::new(false);
+
 /// Where the panel was left, across launches.
 ///
 /// A window you positioned and then found back in the middle of the screen after
@@ -167,6 +175,15 @@ fn start_server() -> Result<String, String> {
 #[tauri::command]
 fn hide_panel(app: tauri::AppHandle) {
     hide(&app);
+}
+
+/// Keep the panel up when it loses focus, or stop.
+///
+/// Escape and the hotkey still dismiss it: pinning suspends the *automatic*
+/// dismissal, and never the deliberate one.
+#[tauri::command]
+fn set_pinned(pinned: bool) {
+    PINNED.store(pinned, Ordering::Relaxed);
 }
 
 /// Where a window of `size` sits, centred on a monitor of `screen` at `origin`.
@@ -404,7 +421,7 @@ pub fn run() {
 
     builder
         .invoke_handler(tauri::generate_handler![
-            hide_panel, start_server, set_layout, start_drag
+            hide_panel, start_server, set_layout, start_drag, set_pinned
         ])
         .setup(|app| {
             // No Dock icon and no menu bar: this is summoned, not launched.
@@ -472,6 +489,12 @@ fn build_panel(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
     let handler = SpotlightEvents::new();
     let handle = app.clone();
     handler.window_did_resign_key(move |_notification| {
+        // Pinned: the reader is doing something in another window on purpose —
+        // finding a file to drag in, most likely — and hiding is the last thing
+        // that helps.
+        if PINNED.load(Ordering::Relaxed) {
+            return;
+        }
         hide(&handle);
     });
     panel.set_event_handler(Some(handler.as_ref()));

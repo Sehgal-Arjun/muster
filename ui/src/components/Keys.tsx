@@ -14,6 +14,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
     ["⌘H", "home"],
     ["⌘P", "processes"],
     ["⌘\\", "one column or two"],
+    ["⌘⇧P", "keep the panel open — to drag a file in from Finder"],
     ["⌘/", "this list"],
     ["esc", "back, then close"],
   ]],
@@ -33,6 +34,12 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
     ["↵", "open the selected attachment"],
     ["⌘C", "copy the body"],
     ["⌘D", "settle the item this came from"],
+  ]],
+  ["A dropped file", [
+    ["↑ ↓", "move through the suggestions"],
+    ["↵", "move it there"],
+    ["⌘Z", "put it back where it was"],
+    ["esc", "leave it where it is"],
   ]],
   ["A process", [
     ["↑ ↓", "move through what is open"],

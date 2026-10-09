@@ -44,3 +44,39 @@ export async function applyLayout(layout: Layout): Promise<void> {
     // Running in a browser against the mock fixtures: CSS still does its half.
   }
 }
+
+
+/**
+ * Whether the panel stays up when it loses focus.
+ *
+ * Dismiss-on-blur is right for a launcher and wrong the moment a second window is
+ * involved: dragging a file in means clicking Finder first, and that click is the
+ * event that hides the panel. So it is a choice, remembered, and off by default —
+ * a launcher that lingers is a window, and most of the time this is a launcher.
+ *
+ * Escape and the hotkey still dismiss it. Pinning suspends the automatic
+ * dismissal, never the deliberate one.
+ */
+const PIN_KEY = "muster.pinned";
+
+export function storedPinned(): boolean {
+  try {
+    return localStorage.getItem(PIN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export async function applyPinned(pinned: boolean): Promise<void> {
+  try {
+    localStorage.setItem(PIN_KEY, pinned ? "1" : "0");
+  } catch {
+    // Applies for this session regardless.
+  }
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("set_pinned", { pinned });
+  } catch {
+    // A browser against the fixtures: there is no panel to pin.
+  }
+}

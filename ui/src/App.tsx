@@ -18,7 +18,9 @@ import { GatherView } from "./components/GatherView";
 import { HomeView } from "./components/HomeView";
 import { Keys } from "./components/Keys";
 import { PlaceView } from "./components/PlaceView";
-import { applyLayout, storeLayout, storedLayout, type Layout } from "./layout";
+import {
+  applyLayout, applyPinned, storeLayout, storedLayout, storedPinned, type Layout,
+} from "./layout";
 import { ProcessPicker } from "./components/ProcessPicker";
 import { Footer } from "./components/Footer";
 import { ResultRow } from "./components/ResultRow";
@@ -167,6 +169,8 @@ export default function App() {
    */
   const [layout, setLayout] = useState<Layout>(storedLayout);
   const [sort, setSort] = useState<Sort>(storedSort);
+  /** Stay up when focus goes elsewhere — needed to drag a file in from Finder. */
+  const [pinned, setPinned] = useState(storedPinned);
   // When the last refresh was asked for, so summoning the panel repeatedly does
   // not mean a request each time.
   const lastRefresh = useRef(0);
@@ -316,6 +320,13 @@ export default function App() {
     storeLayout(layout);
     void applyLayout(layout);
   }, [layout]);
+
+  // Also pinned while a dropped file is waiting to be placed: the queue exists
+  // because you went to another window to fetch something, and the next thing you
+  // do may be fetching another.
+  useEffect(() => {
+    void applyPinned(pinned || dropped.length > 0);
+  }, [pinned, dropped.length]);
 
   useEffect(() => {
     try {
@@ -764,6 +775,14 @@ export default function App() {
           .catch(() => undefined);
         return;
       }
+      if (
+        (event.metaKey || event.ctrlKey) && event.shiftKey
+        && event.key.toLowerCase() === "p"
+      ) {
+        event.preventDefault();
+        setPinned((on) => !on);
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && event.key === "/") {
         event.preventDefault();
         setShowKeys((open) => !open);
@@ -1022,6 +1041,7 @@ export default function App() {
       gathering={gatherSlug !== null}
       split={split}
       sort={sort}
+      pinned={pinned || dropped.length > 0}
       syncing={syncing}
       onDrag={beginDrag}
     />
