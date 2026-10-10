@@ -195,3 +195,39 @@ def test_the_meaning_text_reads_as_a_path(conn, tmp_path) -> None:
     deepest = max(scanned, key=lambda s: s.folder.depth)
     assert deepest.meaning_text.endswith("Sample Exams")
     assert " / " in deepest.meaning_text
+
+
+# --- what a file says about where it belongs -------------------------------
+
+
+def test_a_course_code_written_as_two_words_becomes_the_one_on_disk() -> None:
+    """The document says "ENVS 205"; the folder is called ENVS205. Joining the
+    pair is the difference between reading a course code and reading two tokens."""
+    from muster.placing import content_terms
+
+    terms = content_terms("ENVS 205 - Assignment 7. Socio-ecological impact of ENVS 205.")
+    assert "ENVS205" in terms
+
+
+def test_a_year_with_something_stuck_to_it_is_not_an_identifier() -> None:
+    """"about 166" and "by 2000" became identifiers and matched folders with total
+    confidence."""
+    from muster.placing import content_terms
+
+    terms = content_terms("There were about 166 responses by 2000 in 2026a.")
+    assert not any(t.lower() in {"about166", "by2000", "2026a"} for t in terms)
+
+
+def test_frequency_is_counted_rather_than_deduplicated() -> None:
+    """The first version used folders.words_of, which dedupes — so every count was
+    one and no term ever qualified."""
+    from muster.placing import content_terms
+
+    terms = content_terms("lease lease lease deposit deposit landlord")
+    assert terms[:2] == ["lease", "deposit"]
+
+
+def test_a_passing_mention_is_not_what_a_document_is_about() -> None:
+    from muster.placing import content_terms
+
+    assert "tangent" not in content_terms("A lease about a lease. Also a tangent.")

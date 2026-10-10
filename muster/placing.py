@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import shutil
 import sqlite3
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +50,27 @@ KEEP_RATIO = 0.55
 CLEAR_LEAD = 1.6
 
 MAX_CANDIDATES = 5
+
+# Words too common to be evidence of anything. Deliberately tiny: this is not a
+# stopword list for retrieval, it is a filter over the handful of terms a
+# document repeats most, and every entry earns its place by being a word that
+# appears in every second document ever written.
+STOPWORDS = frozenset("""
+the a an and or of to in for on at by with from as is are was were be been this
+that these those it its will would should could can may not no if then than so
+your you my our their his her they we he she i me us them
+page pdf doc docx file document date name please thank thanks dear sincerely
+""".split())
+
+# How many of a document's own words are worth matching folders against. Six is
+# enough to carry a course code, a counterparty and a subject; more is the middle
+# of the document, which is about content rather than category.
+CONTENT_TERMS = 6
+
+# A term has to be repeated to count as what the document is *about*. One mention
+# is a passing reference, and passing references match the wrong folder
+# confidently.
+MIN_TERM_COUNT = 2
 
 # A folder named by one arm alone, halfway down its list, is not evidence — and
 # five of those look exactly like five suggestions. Measured on real downloads:
@@ -105,6 +127,67 @@ def file_text(path: Path, budget: int = TEXT_BUDGET) -> str:
     except Exception as exc:  # noqa: BLE001 — unparseable is a normal case here
         log.debug("no text for %s: %s", path, exc)
         return ""
+
+
+def content_terms(text: str, limit: int = CONTENT_TERMS) -> list[str]:
+    """The words a document is about, as far as counting can tell.
+
+    Frequency over its own words, which is crude and has one great virtue: it can
+    be shown to you. "text mentions ENVS 205" is a claim you can check against the
+    file in a second, where "reads like what is filed here" is a claim about a
+    cosine distance that you cannot check at all.
+
+    Identifiers are kept whatever their count — MATH213, ENVS205, SE465. A code
+    appearing once is still a code, and it is usually the whole answer. Written as
+    two words in the document ("ENVS 205") and as one on disk, so the pair is
+    joined — but only when the letters are capitalised, or "about 166" becomes an
+    identifier and matches a folder with total confidence.
+    """
+    if not text:
+        return []
+    counts: dict[str, int] = {}
+    identifiers: list[str] = []
+    # Tokenised here rather than through folders.words_of, which dedupes — it is
+    # built for path segments, where a repeat means nothing. Frequency is the
+    # whole signal here, and deduping made every count exactly one.
+    tokens = re.findall(r"[0-9A-Za-z]+", text)
+    for index, word in enumerate(tokens):
+        # "ENVS 205" is one name written as two words, and the folder it belongs
+        # to is called ENVS205. Joining the pair is the difference between reading
+        # a course code and reading two unrelated tokens.
+        if (
+            word.isalpha() and word.isupper() and 2 <= len(word) <= 5
+            and index + 1 < len(tokens)
+            and tokens[index + 1].isdigit()
+            and 2 <= len(tokens[index + 1]) <= 4
+        ):
+            joined = f"{word}{tokens[index + 1]}"
+            if joined not in identifiers:
+                identifiers.append(joined)
+    for word in tokens:
+        low = word.lower()
+        if len(low) < 3 or low in STOPWORDS or low.isdigit():
+            continue
+        # A letters-then-digits token: a course code, a model number, a case
+        # number. Rare in prose and decisive when present.
+        # Mixed letters and digits, both of them substantially: MATH213 and
+        # A1234567 qualify, "2026a" and "by2000" are a year with something stuck
+        # to it and matched folders full of confident nonsense.
+        digits = sum(c.isdigit() for c in low)
+        letters = sum(c.isalpha() for c in low)
+        if digits >= 2 and letters >= 2:
+            if word not in identifiers:
+                identifiers.append(word)
+            continue
+        counts[low] = counts.get(low, 0) + 1
+
+    repeated = sorted(
+        (w for w, n in counts.items() if n >= MIN_TERM_COUNT),
+        key=lambda w: (-counts[w], -len(w), w),
+    )
+    # Identifiers first: they are the strongest thing a document can say about
+    # where it belongs.
+    return (identifiers + repeated)[:limit]
 
 
 def _neighbours(
@@ -184,6 +267,30 @@ def candidates(
                 # "MATH213 midterm.pdf" into "MATH213". That is enough on its own.
                 if wanted & {w.lower() for w in folders.words_of(folder.name)}:
                     strong.add(folder.path)
+
+    # What the document says, matched against folder names the same way its own
+    # name is. This is the arm that files "ENVS 205 Assignment 7.pdf" under
+    # ENVS205 by reading it rather than by trusting the filename to be tidy.
+    terms = content_terms(text)
+    if terms:
+        merged: dict[str, tuple[int, folders.Folder]] = {}
+        best_rank: dict[str, int] = {}
+        for term in terms:
+            for rank, (folder_id, folder) in enumerate(
+                folders.word_matches(conn, [term], depth), start=1
+            ):
+                if folder.path not in best_rank or rank < best_rank[folder.path]:
+                    best_rank[folder.path] = rank
+                    merged[folder.path] = (folder_id, folder)
+                why.setdefault(folder.path, []).append(f"text mentions {term}")
+                # A folder whose own name is a word the document keeps using is
+                # not a coincidence worth hedging about.
+                if term.lower() in {w.lower() for w in folders.words_of(folder.name)}:
+                    strong.add(folder.path)
+        if merged:
+            arms.append([
+                merged[path] for path in sorted(best_rank, key=lambda p: best_rank[p])
+            ])
 
     if model_id and (text or name_words):
         query = f"{target.stem} {text}".strip()
