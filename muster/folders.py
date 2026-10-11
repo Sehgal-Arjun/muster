@@ -34,6 +34,15 @@ DEFAULT_MAX_DEPTH = 5
 MAX_QUERY_WORDS = 6
 
 _SPLIT = re.compile(r"[^0-9A-Za-z]+")
+# Directories named by a machine: UUIDs, content hashes, build ids. Never a place
+# a person decides to file something, and as folder *names* they are pure noise —
+# a name with no words in it matches everything equally in the meaning arm, which
+# is how nine of twelve suggestions for a German housing letter came to be
+# storage directories from a side project.
+_MACHINE_NAME = re.compile(
+    r"^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,})$",
+    re.IGNORECASE,
+)
 _CAMEL = re.compile(r"(?<=[a-z])(?=[A-Z])")
 _ALPHANUM = re.compile(r"(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])")
 
@@ -121,7 +130,9 @@ def scan(
                 continue
             dirnames[:] = [
                 d for d in dirnames
-                if d.lower() not in excluded and not d.startswith(".")
+                if d.lower() not in excluded
+                and not d.startswith(".")
+                and not _MACHINE_NAME.match(d)
             ]
             for name in dirnames:
                 path = here / name

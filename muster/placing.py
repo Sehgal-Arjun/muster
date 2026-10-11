@@ -60,6 +60,10 @@ the a an and or of to in for on at by with from as is are was were be been this
 that these those it its will would should could can may not no if then than so
 your you my our their his her they we he she i me us them
 page pdf doc docx file document date name please thank thanks dear sincerely
+der die das den dem des ein eine einen einem und oder von zu im am bei mit
+uhr sie ihr ihre sich nicht auch aus nach vor wird werden sind haben hat
+le la les un une des du de et ou pour dans sur avec par est sont
+el los las una para con por que se del
 """.split())
 
 # How many of a document's own words are worth matching folders against. Six is
@@ -150,7 +154,9 @@ def content_terms(text: str, limit: int = CONTENT_TERMS) -> list[str]:
     # Tokenised here rather than through folders.words_of, which dedupes — it is
     # built for path segments, where a repeat means nothing. Frequency is the
     # whole signal here, and deduping made every count exactly one.
-    tokens = re.findall(r"[0-9A-Za-z]+", text)
+    # Unicode-aware: `[0-9A-Za-z]+` cut "Schlüsselabholung" into "schl" and
+    # "sselabholung", which is what every accented word in the archive became.
+    tokens = re.findall(r"[^\W_]+", text, re.UNICODE)
     for index, word in enumerate(tokens):
         # "ENVS 205" is one name written as two words, and the folder it belongs
         # to is called ENVS205. Joining the pair is the difference between reading
@@ -236,14 +242,69 @@ def _folder_row(conn: sqlite3.Connection, path: str) -> tuple[int, folders.Folde
     )
 
 
+# How many folders the judgement is shown. Measured, not guessed: with eight
+# options the model picked the right German housing folder and said why; with
+# twenty-four — the same eight plus project directories — it abstained. A long
+# list is not more recall, it is less attention.
+SHORTLIST = 6
+
+# Whose families are worth adding. The arms recognise a category and cannot choose
+# inside it, so the children of the best few are exactly what is missing.
+RELATIVES_OF = 3
+
+# Everything the judgement sees, after families. Beyond about ten it stops
+# choosing.
+SHORTLIST_TOTAL = 10
+
+
+def _with_relatives(
+    conn: sqlite3.Connection, found: list[folders.Folder]
+) -> list[folders.Folder]:
+    """The shortlist, plus the parents and children of what is on it.
+
+    The arms are good at recognising a *category* and poor at choosing inside it:
+    for a German letter about collecting keys they named `Housing`, which is right,
+    and could not reach `Housing/TUM`, which is the answer. Offering the family of
+    every folder they named costs one query and puts the answer in the room.
+    """
+    out: list[folders.Folder] = list(found)
+    seen = {f.path for f in found}
+    for folder in found[:RELATIVES_OF]:
+        for row in conn.execute(
+            "SELECT path, name, depth, mtime FROM folders"
+            " WHERE path = ? OR (path LIKE ? AND path NOT LIKE ?)",
+            (
+                str(Path(folder.path).parent),
+                f"{folder.path}/%",
+                f"{folder.path}/%/%",     # children, not descendants
+            ),
+        ):
+            if row["path"] in seen:
+                continue
+            seen.add(row["path"])
+            out.append(folders.Folder(
+                path=row["path"], name=row["name"],
+                depth=row["depth"], mtime=row["mtime"],
+            ))
+    return out[:SHORTLIST_TOTAL]
+
+
 def candidates(
     conn: sqlite3.Connection,
     path: str | Path,
     *,
     model_id: str | None = None,
     limit: int = MAX_CANDIDATES,
+    reason_with: str | None = None,
+    ask=None,
 ) -> list[Candidate]:
-    """Where this file plausibly belongs, best first, with reasons."""
+    """Where this file plausibly belongs, best first, with reasons.
+
+    With `reason_with` (an extraction model), the arms become a shortlist and one
+    cached judgement picks from it. That is the only part of this that knows
+    anything about the world, and it is why a German letter from a Munich student
+    housing office can reach a folder called TUM.
+    """
     target = Path(path).expanduser()
     name_words = folders.words_of(target.stem)
     text = file_text(target)
@@ -301,6 +362,7 @@ def candidates(
                 why.setdefault(folder.path, []).append("reads like what is filed here")
 
     neighbour_arm: list[tuple[int, folders.Folder]] = []
+    neighbour_paths: set[str] = set()
     counted, total_of_kind = _neighbours(conn, target.suffix, depth)
     total_of_kind = total_of_kind or 1
     for folder_path, count in counted:
@@ -308,6 +370,7 @@ def candidates(
         if found is None:
             continue      # outside the indexed roots, or below the depth limit
         neighbour_arm.append(found)
+        neighbour_paths.add(folder_path)
         kind = target.suffix.lstrip(".").lower() or "file"
         why.setdefault(folder_path, []).append(
             f"{count} other {kind} file{'s' if count > 1 else ''} here"
@@ -348,6 +411,48 @@ def candidates(
     ordered = sorted(scores, key=lambda p: (-scores[p], seen[p].depth))
     best = scores[ordered[0]]
 
+    # Before filtering for confidence: the judgement gets the wide list, because
+    # the answer the arms cannot justify is exactly the one it is here to find.
+    if reason_with:
+        # Only folders some arm found *about* this file, plus their families. A
+        # folder that merely holds pdfs says nothing about what this pdf is, and
+        # four of them crowding the list is what made the judgement abstain on a
+        # German housing letter whose answer was sitting at number six.
+        about = [
+            p for p in ordered
+            if p not in neighbour_paths or named_by[p] > 1
+        ][:SHORTLIST]
+        shortlist = _with_relatives(conn, [seen[p] for p in about])
+        chosen, verdict = choose(
+            conn, name=target.name, text=text, options=shortlist,
+            model=reason_with, ask=ask,
+        )
+        # Looked up in the shortlist rather than in `seen`: the folders added as
+        # relatives were never scored by an arm, and requiring a score threw away
+        # exactly the answers this step exists to find.
+        offered = {f.path: f for f in shortlist}
+        if chosen and chosen in offered:
+            # Named as a judgement rather than a measurement, because it is one,
+            # and because you should know which of the two to distrust.
+            first = Candidate(
+                folder=offered[chosen],
+                # A judgement has no score. Reported as the reason it is: read.
+                score=scores.get(chosen, 0.0),
+                reasons=(
+                    f"read it: {verdict}" if verdict else "read it and chose this",
+                    *dict.fromkeys(why.get(chosen, [])),
+                ),
+            )
+            rest = [
+                Candidate(
+                    folder=seen[p], score=scores[p],
+                    reasons=tuple(dict.fromkeys(why.get(p, ["similar folder"]))),
+                )
+                for p in ordered
+                if p != chosen and (named_by[p] >= MIN_ARMS or p in strong)
+            ][: max(limit - 1, 0)]
+            return [first, *rest]
+
     # One when one is clearly ahead; several when several are close. The number of
     # suggestions is evidence about the file, not a layout decision.
     if len(ordered) > 1 and best >= CLEAR_LEAD * scores[ordered[1]]:
@@ -363,6 +468,119 @@ def candidates(
         )
         for p in ordered
     ]
+
+
+# The question's own version. Not in the table as a column but mixed into its key:
+# a changed prompt is a different question, and without this the cache answered the
+# new question with the old answer — I improved the prompt, re-ran it, and got the
+# previous abstention back three times before noticing.
+CHOICE_VERSION = 2
+
+CHOICE_PROMPT = """A file has arrived and needs filing. Which of these folders does it belong in?
+
+FILE: {name}
+
+WHAT IT SAYS (any language, first page only):
+{text}
+
+FOLDERS:
+{options}
+
+Think about what the document is for and who it is from, not only its words. A
+letter from a university's housing office belongs with that university's housing,
+whatever language it is written in.
+
+Answer with the number of the best folder. Nothing is moved by your answer: it is
+shown as a suggestion and a person confirms it, so a plausible folder they can
+reject is far more useful than abstaining. Answer null only when none of the
+folders is even close.
+
+Return ONLY {{"folder": <number or null>, "why": "<eight words, naming what in the document decided it>"}}."""
+
+
+def _choice_keys(name: str, text: str, options: list[str]) -> tuple[str, str]:
+    import hashlib
+
+    def digest(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    return (
+        digest(f"{name}\n{text}"),
+        digest(f"v{CHOICE_VERSION}\n" + "\n".join(options)),
+    )
+
+
+def choose(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    text: str,
+    options: list[folders.Folder],
+    model: str,
+    ask=None,
+    cached_only: bool = False,
+) -> tuple[str | None, str | None]:
+    """Which of these folders the document belongs in, if any. Cached.
+
+    The arms are good at recall and know nothing about the world. This knows that
+    TUM is a university in Munich, and that is the entire reason it exists.
+
+    Returns (folder path or None, reason). "None of these" is a real answer and is
+    cached like any other: a wrong folder is worse than no answer, because a file
+    in the wrong place is lost twice.
+    """
+    if not options:
+        return None, None
+    paths = [f.path for f in options]
+    text_key, options_key = _choice_keys(name, text, paths)
+    row = conn.execute(
+        "SELECT chosen, reason FROM placement_choices"
+        " WHERE text_key = ? AND options_key = ? AND model_id = ?",
+        (text_key, options_key, model),
+    ).fetchone()
+    if row is not None:
+        return row["chosen"], row["reason"]
+    if cached_only:
+        return None, None
+
+    if ask is None:
+        from muster.extraction import _ask_model as ask  # noqa: PLC0415
+
+    chosen: str | None = None
+    reason: str | None = None
+    try:
+        import json
+
+        listing = "\n".join(
+            f"{i}. {f.display}" for i, f in enumerate(options, start=1)
+        )
+        raw = ask(
+            CHOICE_PROMPT.format(name=name, text=text[:1200], options=listing), model
+        )
+        parsed = json.loads(raw)
+        index = parsed.get("folder")
+        if isinstance(index, int) and 1 <= index <= len(options):
+            chosen = paths[index - 1]
+            got = parsed.get("why")
+            reason = got.strip()[:120] if isinstance(got, str) else None
+    except Exception as exc:  # noqa: BLE001 — no answer is an answer here
+        log.debug("placement choice failed for %s: %s", name, exc)
+        return None, None
+
+    # An abstention is not cached. "None of these" almost always means the
+    # shortlist was wrong rather than that no answer exists, and caching it turns
+    # a bad shortlist into a permanent one — which is exactly what happened while
+    # building this: an improved question kept reading back the old "no".
+    if chosen:
+        conn.execute(
+            "INSERT OR REPLACE INTO placement_choices"
+            " (text_key, options_key, model_id, chosen, reason, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (text_key, options_key, model, chosen, reason,
+             datetime.now(UTC).isoformat(timespec="seconds")),
+        )
+        conn.commit()
+    return chosen, reason
 
 
 class MoveRefused(Exception):

@@ -994,7 +994,12 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise ApiError(404, "not_found", f"no file at {target}")
 
         conn = _connection(cfg)
-        found = placing.candidates(conn, target, model_id=cfg.embed.model_id)
+        found = placing.candidates(
+            conn, target, model_id=cfg.embed.model_id,
+            # The judgement over the shortlist: slow once (~5-10s), cached after,
+            # and the only part that knows TUM is a university in Munich.
+            reason_with=cfg.extract.model_id,
+        )
         row = conn.execute(
             "SELECT id FROM docs WHERE source = 'file'"
             " AND (source_uid = ? OR json_extract(meta_json, '$.path') = ?)",
