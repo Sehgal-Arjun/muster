@@ -823,3 +823,8 @@ img.doc-embed { height: auto; max-height: 68vh; object-fit: contain; }
   cursor: pointer;
 }
 .placed-close { border: none; color: var(--dim); }
+
+/* The name it will get. Shown only when there is something to change. */
+.place-rename { display: flex; align-items: center; gap: 8px; margin: 6px 0 8px; }
+.place-rename-label { flex: none; font-size: 11px; }
+.place-name { flex: 1; border: 1px solid var(--line); border-radius: 7px; }

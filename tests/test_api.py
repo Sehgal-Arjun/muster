@@ -1057,3 +1057,48 @@ def test_moving_an_indexed_file_keeps_it_one_document(client, conn, tmp_path) ->
     assert jsonlib.loads(rows[0]["meta_json"])["path"] == str(destination / "lease.pdf")
     # It had been marked gone; it demonstrably is not.
     assert rows[0]["missing_since"] is None
+
+
+def test_a_move_can_rename_and_the_document_follows(client, conn, tmp_path) -> None:
+    """A file in the right folder under a meaningless name is still lost, just in
+    a smaller haystack. The title follows, because for a file the title is the name."""
+    import json as jsonlib
+
+    source, destination = tmp_path / "from", tmp_path / "to"
+    source.mkdir()
+    destination.mkdir()
+    dropped = source / "Key Collection Template.pdf"
+    dropped.write_text("keys")
+    conn.execute(
+        "INSERT INTO docs (source, source_uid, content_hash, mime, doc_date, date_source,"
+        " ingested_at, title, meta_json) VALUES ('file', ?, 'abc', 'application/pdf',"
+        " '2026-01-01T00:00:00+00:00', 'mtime', '2026-01-01', 'Key Collection Template.pdf', ?)",
+        (str(dropped), jsonlib.dumps({"path": str(dropped)})),
+    )
+    conn.commit()
+
+    body = client.post("/place/confirm", json={
+        "path": str(dropped), "destination": str(destination),
+        "name": "TUM Key Collection Instructions",
+    }).json()
+    assert body["to"] == str(destination / "TUM Key Collection Instructions.pdf")
+    assert (destination / "TUM Key Collection Instructions.pdf").read_text() == "keys"
+    row = conn.execute(
+        "SELECT source_uid, title FROM docs WHERE source_uid LIKE ?", (f"{tmp_path}%",)
+    ).fetchone()
+    assert row["title"] == "TUM Key Collection Instructions.pdf"
+
+
+def test_a_name_that_is_not_a_name_is_refused(client, tmp_path) -> None:
+    """A suggestion is a string from a model that is about to become something on
+    a filesystem. A slash in it is a misunderstanding, not a character to strip."""
+    source, destination = tmp_path / "from", tmp_path / "to"
+    source.mkdir()
+    destination.mkdir()
+    (source / "a.pdf").write_text("x")
+    response = client.post("/place/confirm", json={
+        "path": str(source / "a.pdf"), "destination": str(destination),
+        "name": "../../etc/passwd",
+    })
+    assert response.status_code == 409
+    assert (source / "a.pdf").exists()

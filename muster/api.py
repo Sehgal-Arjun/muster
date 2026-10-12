@@ -1005,10 +1005,17 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             " AND (source_uid = ? OR json_extract(meta_json, '$.path') = ?)",
             (str(target), str(target)),
         ).fetchone()
+        suggested = placing.suggest_name(
+            conn, path=target, text=placing.file_text(target),
+            model=cfg.extract.model_id,
+        )
         return {
             "file": {
                 "path": str(target),
                 "name": target.name,
+                # A better name, or null to keep this one. Suggested only: the
+                # rename happens when a person confirms it, with the move.
+                "suggested_name": suggested,
                 "folder": str(target.parent),
                 "size": target.stat().st_size,
                 # Whether Muster already knows this file. Not required to move it:
@@ -1031,12 +1038,13 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
         raw = (body.get("path") or "").strip()
         destination = (body.get("destination") or "").strip()
+        rename = (body.get("name") or "").strip() or None
         if not raw or not destination:
             raise ApiError(400, "bad_request", "path and destination are required")
 
         conn = _connection(cfg)
         try:
-            moved = placing.move(conn, raw, destination)
+            moved = placing.move(conn, raw, destination, new_name=rename)
         except placing.MoveRefused as exc:
             # Refused, not failed: the caller asked for something that would have
             # destroyed or invented something.

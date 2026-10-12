@@ -31,6 +31,13 @@ export function PlaceView({
   const [browsed, setBrowsed] = useState<FolderHit[]>([]);
   const [selected, setSelected] = useState(0);
   const [moving, setMoving] = useState(false);
+  /**
+   * What it will be called. Prefilled with the suggestion when there is one —
+   * a file in the right folder under a meaningless name is still lost, just in a
+   * smaller haystack — and editable, because it is your file and your words.
+   */
+  const [name, setName] = useState("");
+  const [renaming, setRenaming] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -38,7 +45,12 @@ export function PlaceView({
     setError(null);
     api
       .placePropose(path)
-      .then((body) => live && setProposal(body))
+      .then((body) => {
+        if (!live) return;
+        setProposal(body);
+        setName(body.file.suggested_name ?? body.file.name);
+        setRenaming(Boolean(body.file.suggested_name));
+      })
       .catch((cause) =>
         live && setError(cause instanceof ApiError ? cause.message : String(cause)),
       );
@@ -78,7 +90,14 @@ export function PlaceView({
       if (moving) return;
       setMoving(true);
       try {
-        const result = await api.placeConfirm(path, destination);
+        const chosenName = name.trim();
+        const result = await api.placeConfirm(
+          path,
+          destination,
+          // Unchanged means unchanged: only a name the reader has actually
+          // altered or accepted travels with the move.
+          chosenName && chosenName !== proposal?.file.name ? chosenName : null,
+        );
         onDone({
           name: result.to.split("/").pop() ?? result.to,
           to: result.to,
@@ -89,7 +108,7 @@ export function PlaceView({
         setMoving(false);
       }
     },
-    [moving, onDone, path],
+    [moving, name, onDone, path, proposal],
   );
 
   useEffect(() => {
@@ -164,6 +183,25 @@ export function PlaceView({
               </li>
             ))}
           </ul>
+
+          {(renaming || name !== file?.name) && (
+            <div className="place-rename">
+              <span className="dim place-rename-label">rename to</span>
+              <input
+                className="sheet-input place-name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                spellCheck={false}
+              />
+              <button
+                className="caveat-action"
+                onClick={() => setName(file?.name ?? "")}
+                title="keep the name it has"
+              >
+                keep original
+              </button>
+            </div>
+          )}
 
           <input
             className="sheet-input place-filter"

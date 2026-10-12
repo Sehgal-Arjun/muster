@@ -594,6 +594,114 @@ def choose(
     return chosen, reason
 
 
+# 2: spaces and institutions. Version 1 returned "LindenstrasseKeysCollection"
+# for a Munich student-housing letter — no spaces, and naming the street rather
+# than the university anybody would search for.
+NAME_VERSION = 2
+
+NAME_PROMPT = """Suggest a better filename for this document.
+
+CURRENT NAME: {name}
+
+WHAT IT SAYS (any language, first page only):
+{text}
+
+A good name says what the document is and whose it is, in the fewest words that
+would let someone find it in a year: "TUM Key Collection Instructions", "ENVS 205
+Assignment 7", "Vodafone Contract 2026". Write it in the language of the person
+filing, which is English.
+
+Rules:
+- Separate words with spaces. Not CamelCase, not underscores.
+- Lead with the organisation, university or course the reader would search for —
+  TUM, ENVS 205, Vodafone — not a street name or a form number.
+- No extension, no dates unless the document is about a specific date, no slashes.
+- Six words at most. Title Case.
+- Answer null if the current name is already clear enough to keep.
+
+Return ONLY {{"name": "<the name>" or null}}."""
+
+# Characters no filename may carry, and the length past which a name stops being
+# a name. A suggestion is still a string from a model, and it is about to become
+# something on a filesystem.
+_UNSAFE = set('/\\:\0')
+MAX_NAME = 70
+
+
+def clean_name(raw: str | None, extension: str) -> str | None:
+    """A suggestion made safe to put on a disk, or nothing.
+
+    Refused rather than sanitised where it matters: a name with a slash in it is
+    not a name with a slash removed, it is a model that misunderstood the
+    question, and quietly reinterpreting that is how a file ends up somewhere
+    nobody chose.
+    """
+    if not raw:
+        return None
+    if str(raw).lstrip().startswith("."):
+        return None      # checked before stripping, or the guard never fires
+    name = " ".join(str(raw).split()).strip(" .")
+    if not name or len(name) > MAX_NAME or any(c in _UNSAFE for c in name):
+        return None
+    if name.startswith("."):
+        return None
+    return f"{name}{extension}"
+
+
+def suggest_name(
+    conn: sqlite3.Connection,
+    *,
+    path: str | Path,
+    text: str,
+    model: str,
+    ask=None,
+    cached_only: bool = False,
+) -> str | None:
+    """A better name for this file, or None to keep the one it has."""
+    import hashlib
+    import json
+
+    target = Path(path)
+    text_key = hashlib.sha256(
+        f"{target.name}\n{text[:1200]}".encode("utf-8")
+    ).hexdigest()
+    row = conn.execute(
+        "SELECT suggested FROM name_suggestions"
+        " WHERE text_key = ? AND model_id = ? AND version = ?",
+        (text_key, model, NAME_VERSION),
+    ).fetchone()
+    if row is not None:
+        return clean_name(row["suggested"], target.suffix)
+    if cached_only:
+        return None
+
+    if ask is None:
+        from muster.extraction import _ask_model as ask  # noqa: PLC0415
+
+    suggested: str | None = None
+    try:
+        raw = ask(
+            NAME_PROMPT.format(name=target.name, text=text[:1200]), model
+        )
+        parsed = json.loads(raw)
+        got = parsed.get("name")
+        suggested = got.strip() if isinstance(got, str) else None
+    except Exception as exc:  # noqa: BLE001 — the existing name is the fallback
+        log.debug("name suggestion failed for %s: %s", target.name, exc)
+        return None
+
+    conn.execute(
+        "INSERT OR REPLACE INTO name_suggestions"
+        " (text_key, model_id, version, suggested, created_at) VALUES (?, ?, ?, ?, ?)",
+        (text_key, model, NAME_VERSION, suggested,
+         datetime.now(UTC).isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    cleaned = clean_name(suggested, target.suffix)
+    # A suggestion identical to the current name is not a suggestion.
+    return None if cleaned == target.name else cleaned
+
+
 class MoveRefused(Exception):
     """A move that must not happen silently, and will not happen at all."""
 
@@ -609,6 +717,7 @@ def move(
     conn: sqlite3.Connection,
     path: str | Path,
     destination: str | Path,
+    new_name: str | None = None,
 ) -> Move:
     """Move one file into one folder, and tell the index it moved.
 
@@ -625,7 +734,19 @@ def move(
         raise MoveRefused(f"not a file: {source}")
     if not folder.is_dir():
         raise MoveRefused(f"not a folder: {folder}")
-    target = folder / source.name
+    if new_name is not None:
+        # The raw string, not Path(...).stem — which turned "../../etc/passwd"
+        # into "passwd" and moved the file happily. Reinterpreting a name nobody
+        # could have meant is exactly what refusing is for.
+        stem = new_name.strip()
+        if source.suffix and stem.lower().endswith(source.suffix.lower()):
+            stem = stem[: -len(source.suffix)]
+        safe = clean_name(stem, source.suffix)
+        if safe is None:
+            raise MoveRefused(f"not a usable filename: {new_name!r}")
+        target = folder / safe
+    else:
+        target = folder / source.name
     if target.exists():
         # Refused rather than renamed. Muster does not get to invent
         # "invoice (2).pdf" on somebody's behalf.
@@ -666,9 +787,11 @@ def _repoint(conn: sqlite3.Connection, old: str, new: str) -> int | None:
     meta["path"] = new
     conn.execute(
         # missing_since cleared: if the sweep had already marked it gone, the file
-        # is demonstrably here — we just moved it.
-        "UPDATE docs SET source_uid = ?, meta_json = ?, missing_since = NULL WHERE id = ?",
-        (new, json.dumps(meta), row["id"]),
+        # is demonstrably here — we just moved it. The title follows the name,
+        # because for a file the title *is* the name and search shows it.
+        "UPDATE docs SET source_uid = ?, meta_json = ?, title = ?,"
+        " missing_since = NULL WHERE id = ?",
+        (new, json.dumps(meta), Path(new).name, row["id"]),
     )
     return int(row["id"])
 

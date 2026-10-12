@@ -335,6 +335,8 @@ export interface PlaceProposal {
     name: string;
     folder: string;
     size: number;
+    /** A better name, or null to keep the one it has. */
+    suggested_name: string | null;
     /** Null when Muster has never indexed this file, which is the common case. */
     doc_id: number | null;
   };
@@ -444,9 +446,9 @@ export const api = {
 
   home: () => get<HomeView>("/home"),
   placePropose: (path: string) => postJson<PlaceProposal>("/place/propose", { path }),
-  placeConfirm: (path: string, destination: string) =>
+  placeConfirm: (path: string, destination: string, name?: string | null) =>
     postJson<{ from: string; to: string; doc_id: number | null; move: number | null }>(
-      "/place/confirm", { path, destination },
+      "/place/confirm", { path, destination, name: name ?? null },
     ),
   placeUndo: (move: number) =>
     postJson<{ from: string; to: string }>("/place/undo", { move }),
