@@ -248,9 +248,10 @@ def _folder_row(conn: sqlite3.Connection, path: str) -> tuple[int, folders.Folde
 # list is not more recall, it is less attention.
 SHORTLIST = 6
 
-# Whose families are worth adding. The arms recognise a category and cannot choose
-# inside it, so the children of the best few are exactly what is missing.
-RELATIVES_OF = 3
+# Whose families are worth adding: all of them. Taking only the top few meant the
+# children of `Housing` were never offered when `Housing` ranked fourth — and
+# `Housing/TUM` was the answer.
+RELATIVES_OF = SHORTLIST
 
 # Everything the judgement sees, after families. Beyond about ten it stops
 # choosing.
@@ -280,6 +281,10 @@ def _with_relatives(
             ),
         ):
             if row["path"] in seen:
+                continue
+            # A bare root — ~/Documents, ~/GitHub — is where things go when
+            # nobody has decided, which is the opposite of what this is for.
+            if row["depth"] <= 1:
                 continue
             seen.add(row["path"])
             out.append(folders.Folder(
@@ -395,6 +400,13 @@ def candidates(
             named_by[folder.path] = named_by.get(folder.path, 0) + 1
             seen.setdefault(folder.path, folder)
 
+    # Kept before the filter below, because the judgement is supposed to see what
+    # the arms *found*, not what they could justify. The filter used to run first
+    # and leave it two folders to choose between — both of them wrong — which is
+    # why a German housing letter was offered a past-exam directory while the same
+    # question, asked by hand with the unfiltered list, answered correctly.
+    all_scores = dict(scores)
+
     # Agreement, or a single arm with something substantial to say. Everything
     # else is dropped: no suggestion is a usable answer, and five ties are not.
     scores = {
@@ -405,11 +417,10 @@ def candidates(
     # Never suggest where it already is.
     here = str(target.parent)
     scores.pop(here, None)
-    if not scores:
-        return []
 
     ordered = sorted(scores, key=lambda p: (-scores[p], seen[p].depth))
-    best = scores[ordered[0]]
+    best = scores[ordered[0]] if ordered else 0.0
+    ordered_all = sorted(all_scores, key=lambda p: (-all_scores[p], seen[p].depth))
 
     # Before filtering for confidence: the judgement gets the wide list, because
     # the answer the arms cannot justify is exactly the one it is here to find.
@@ -419,7 +430,7 @@ def candidates(
         # four of them crowding the list is what made the judgement abstain on a
         # German housing letter whose answer was sitting at number six.
         about = [
-            p for p in ordered
+            p for p in ordered_all
             if p not in neighbour_paths or named_by[p] > 1
         ][:SHORTLIST]
         shortlist = _with_relatives(conn, [seen[p] for p in about])
