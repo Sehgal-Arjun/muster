@@ -58,10 +58,25 @@ fn remember_placement(app: &tauri::AppHandle) {
     else {
         return;
     };
-    let Ok(position) = window.outer_position() else { return };
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let at = position.to_logical::<f64>(scale);
-    let _ = std::fs::write(path, format!("{{\"x\": {}, \"y\": {}}}", at.x, at.y));
+    let Some((at, size)) = panel_rect(&window) else { return };
+    // Picked up but put down where it already was — a click on the query bar's
+    // padding starts a drag too. That is not choosing a place, and recording it
+    // would pin the panel to wherever centre happened to be on this display.
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let scale = monitor.scale_factor();
+        let origin = monitor.position().to_logical::<f64>(scale);
+        let screen = monitor.size().to_logical::<f64>(scale);
+        let centre = centred_origin((origin.x, origin.y), (screen.width, screen.height), size);
+        if (at.0 - centre.0).abs() < 2.0 && (at.1 - centre.1).abs() < 2.0 {
+            forget_placement();
+            return;
+        }
+    }
+    if !mostly_visible(at, size, &monitor_rects(&window)) {
+        forget_placement();
+        return;
+    }
+    let _ = std::fs::write(path, format!("{{\"x\": {}, \"y\": {}}}", at.0, at.1));
 }
 
 #[cfg(target_os = "macos")]
@@ -71,10 +86,15 @@ fn restore_placement(app: &tauri::AppHandle) {
         return;
     };
     let Ok(text) = std::fs::read_to_string(path) else { return };
-    if let Some((x, y)) = parse_placement(&text) {
-        PLACED.store(true, Ordering::Relaxed);
-        let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+    let Some((x, y)) = parse_placement(&text) else { return };
+    let Some((_, size)) = panel_rect(&window) else { return };
+    if !mostly_visible((x, y), size, &monitor_rects(&window)) {
+        // Saved off the edge, or on a display that is no longer attached.
+        forget_placement();
+        return;
     }
+    PLACED.store(true, Ordering::Relaxed);
+    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
 }
 /// The two numbers out of the placement file.
 ///
@@ -235,6 +255,88 @@ fn anchored_origin(centre: (f64, f64), size: (f64, f64)) -> (f64, f64) {
     (centre.0 - size.0 / 2.0, centre.1 - size.1 / 2.0)
 }
 
+/// Pull a window of `size` at `at` back inside a monitor, moving it as little
+/// as possible.
+///
+/// Growing around the middle is right until the middle is near an edge: a narrow
+/// panel dropped by the left of the screen and then widened for split mode grew
+/// 230 points past it — and that is the position the next hide wrote down, so
+/// every later summon opened half off the display.
+fn clamp_into(
+    at: (f64, f64),
+    size: (f64, f64),
+    origin: (f64, f64),
+    screen: (f64, f64),
+) -> (f64, f64) {
+    let axis = |at: f64, size: f64, origin: f64, screen: f64| {
+        if size >= screen {
+            origin
+        } else {
+            at.clamp(origin, origin + screen - size)
+        }
+    };
+    (
+        axis(at.0, size.0, origin.0, screen.0),
+        axis(at.1, size.1, origin.1, screen.1),
+    )
+}
+
+/// Whether most of a window of `size` at `at` falls on one of `monitors`.
+///
+/// A remembered place is only worth returning to if the reader can see it. One
+/// saved while a second display was attached, or written by a resize that ran
+/// off the edge, would otherwise reopen the panel somewhere it cannot be reached
+/// without hunting for a corner to drag.
+fn mostly_visible(
+    at: (f64, f64),
+    size: (f64, f64),
+    monitors: &[((f64, f64), (f64, f64))],
+) -> bool {
+    let area = size.0 * size.1;
+    if area <= 0.0 {
+        return false;
+    }
+    monitors.iter().any(|&(origin, screen)| {
+        let w = (at.0 + size.0).min(origin.0 + screen.0) - at.0.max(origin.0);
+        let h = (at.1 + size.1).min(origin.1 + screen.1) - at.1.max(origin.1);
+        w > 0.0 && h > 0.0 && w * h >= 0.9 * area
+    })
+}
+
+/// Every connected monitor as (origin, size), in logical points.
+#[cfg(target_os = "macos")]
+fn monitor_rects(window: &tauri::WebviewWindow) -> Vec<((f64, f64), (f64, f64))> {
+    window
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|monitor| {
+            let scale = monitor.scale_factor();
+            let origin = monitor.position().to_logical::<f64>(scale);
+            let size = monitor.size().to_logical::<f64>(scale);
+            ((origin.x, origin.y), (size.width, size.height))
+        })
+        .collect()
+}
+
+/// The panel's position and size, in logical points.
+#[cfg(target_os = "macos")]
+fn panel_rect(window: &tauri::WebviewWindow) -> Option<((f64, f64), (f64, f64))> {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let at = window.outer_position().ok()?.to_logical::<f64>(scale);
+    let size = window.inner_size().ok()?.to_logical::<f64>(scale);
+    Some(((at.x, at.y), (size.width, size.height)))
+}
+
+/// Back to centring on every summon, and nothing remembered.
+#[cfg(target_os = "macos")]
+fn forget_placement() {
+    PLACED.store(false, Ordering::Relaxed);
+    if let Some(path) = placement_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Centre the panel on the monitor it is on, for a known size.
 ///
 /// Not `window.center()`. That measures the window as it is right now, and the
@@ -320,8 +422,20 @@ fn set_layout(app: tauri::AppHandle, wide: bool) {
                 // Grow around the middle, so a window the reader placed stays
                 // where they placed it rather than jumping back to centre.
                 if let Some(centre) = anchor {
-                    let (x, y) = anchored_origin(centre, (size.width, size.height));
-                    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+                    let wanted = (size.width, size.height);
+                    let mut at = anchored_origin(centre, wanted);
+                    if let Ok(Some(monitor)) = window.current_monitor() {
+                        let scale = monitor.scale_factor();
+                        let origin = monitor.position().to_logical::<f64>(scale);
+                        let screen = monitor.size().to_logical::<f64>(scale);
+                        at = clamp_into(
+                            at,
+                            wanted,
+                            (origin.x, origin.y),
+                            (screen.width, screen.height),
+                        );
+                    }
+                    let _ = window.set_position(tauri::LogicalPosition::new(at.0, at.1));
                 }
             } else {
                 centre_on_monitor(&window, size);
@@ -397,6 +511,18 @@ fn toggle(app: &tauri::AppHandle) {
             // dismissed. All three were the same line.
             // Only until the reader has picked a place for it. After that,
             // re-centring every summon would silently undo the drag.
+            //
+            // A placed panel that is no longer on any screen — its display was
+            // unplugged since — goes back to the middle rather than staying lost.
+            if PLACED.load(Ordering::Relaxed) {
+                if let Some(window) = handle.get_webview_window(PANEL) {
+                    if let Some((at, size)) = panel_rect(&window) {
+                        if !mostly_visible(at, size, &monitor_rects(&window)) {
+                            forget_placement();
+                        }
+                    }
+                }
+            }
             if !PLACED.load(Ordering::Relaxed) {
                 if let Some(window) = handle.get_webview_window(PANEL) {
                     let scale = window.scale_factor().unwrap_or(1.0);
@@ -695,6 +821,48 @@ mod tests {
         assert_eq!(super::parse_placement(""), None);
         assert_eq!(super::parse_placement("{\"x\": 10}"), None);
         assert_eq!(super::parse_placement("{\"x\": abc, \"y\": 3}"), None);
+    }
+
+    /// The real one: a 3024×1964 Retina display is 1512×982 points, and the
+    /// panel kept reopening at x = -297, more than a third of it off the left.
+    #[test]
+    fn a_remembered_place_off_the_screen_is_not_returned_to() {
+        let laptop = [((0.0, 0.0), (1512.0, 982.0))];
+        assert!(!super::mostly_visible((-297.0, 38.0), (1180.0, 700.0), &laptop));
+        assert!(!super::mostly_visible((-297.0, 38.0), (720.0, 460.0), &laptop));
+        // Anywhere wholly on screen is a real choice and is kept.
+        assert!(super::mostly_visible((40.0, 38.0), (720.0, 460.0), &laptop));
+        // So is a little past the edge: nobody drags with pixel precision.
+        assert!(super::mostly_visible((-20.0, 38.0), (720.0, 460.0), &laptop));
+    }
+
+    #[test]
+    fn a_place_on_a_display_that_is_gone_is_not_returned_to() {
+        let both = [((0.0, 0.0), (1512.0, 982.0)), ((-1920.0, 0.0), (1920.0, 1080.0))];
+        let laptop_only = [both[0]];
+        let on_external = (-1400.0, 200.0);
+        assert!(super::mostly_visible(on_external, (720.0, 460.0), &both));
+        assert!(!super::mostly_visible(on_external, (720.0, 460.0), &laptop_only));
+    }
+
+    #[test]
+    fn widening_near_an_edge_stays_on_the_screen() {
+        let screen = ((0.0, 0.0), (1512.0, 982.0));
+        // Narrow panel near the left, widened around its middle: runs off.
+        let grown = anchored_origin((40.0 + 360.0, 38.0 + 230.0), (1180.0, 700.0));
+        assert!(grown.0 < 0.0);
+        let kept = super::clamp_into(grown, (1180.0, 700.0), screen.0, screen.1);
+        assert_eq!(kept, (0.0, 0.0));
+        // Already inside: not moved at all.
+        assert_eq!(
+            super::clamp_into((100.0, 100.0), (720.0, 460.0), screen.0, screen.1),
+            (100.0, 100.0)
+        );
+        // Bigger than the screen: pinned to its top-left rather than past it.
+        assert_eq!(
+            super::clamp_into((-50.0, -50.0), (2000.0, 1200.0), screen.0, screen.1),
+            (0.0, 0.0)
+        );
     }
 
     #[test]
