@@ -392,6 +392,12 @@ export default function App() {
       // later search quietly worse with a word in the footer as the only clue.
       // Carrying that across summons is the bug, not the feature.
       setMode("hybrid");
+      // Whatever was open is closed; the query is not. A document or a gather
+      // view left open makes the field read-only, so a summon that kept them
+      // drew a panel you could not type into until ⌘H took you home first.
+      setStack([]);
+      setGatherSlug(null);
+      setPicking(false);
       void refresh();
       // Checked on the way in, so the first keystroke does not have to pay for
       // discovering the server is absent.
